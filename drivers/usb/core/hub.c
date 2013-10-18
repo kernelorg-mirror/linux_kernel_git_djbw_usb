@@ -22,11 +22,10 @@
 #include <linux/usb/hcd.h>
 #include <linux/usb/otg.h>
 #include <linux/usb/quirks.h>
-#include <linux/kthread.h>
 #include <linux/mutex.h>
-#include <linux/freezer.h>
 #include <linux/random.h>
 #include <linux/pm_qos.h>
+#include <linux/workqueue.h>
 
 #include <asm/uaccess.h>
 #include <asm/byteorder.h>
@@ -53,14 +52,7 @@ static inline int hub_is_superspeed(struct usb_device *hdev)
  * change to USB_STATE_NOTATTACHED even when the semaphore isn't held. */
 static DEFINE_SPINLOCK(device_state_lock);
 
-/* khubd's worklist and its lock */
-static DEFINE_SPINLOCK(hub_event_lock);
-static LIST_HEAD(hub_event_list);	/* List of hubs needing servicing */
-
-/* Wakes up khubd */
-static DECLARE_WAIT_QUEUE_HEAD(khubd_wait);
-
-static struct task_struct *khubd_task;
+static struct workqueue_struct *khubd_wq;
 
 /* cycle leds on hubs that aren't blinking for attention */
 static bool blinkenlights = 0;
@@ -577,18 +569,12 @@ static int hub_port_status(struct usb_hub *hub, int port1,
 
 static void kick_khubd(struct usb_hub *hub)
 {
-	unsigned long	flags;
+	struct usb_interface *intf = to_usb_interface(hub->intfdev);
 
-	spin_lock_irqsave(&hub_event_lock, flags);
-	if (!hub->disconnected && list_empty(&hub->event_list)) {
-		list_add_tail(&hub->event_list, &hub_event_list);
-
-		/* Suppress autosuspend until khubd runs */
-		usb_autopm_get_interface_no_resume(
-				to_usb_interface(hub->intfdev));
-		wake_up(&khubd_wait);
-	}
-	spin_unlock_irqrestore(&hub_event_lock, flags);
+	/* Suppress autosuspend until khubd runs */
+	usb_autopm_get_interface_no_resume(intf);
+	if (!queue_work(khubd_wq, &hub->event_work))
+		usb_autopm_put_interface_async(intf);
 }
 
 void usb_kick_khubd(struct usb_device *hdev)
@@ -1559,10 +1545,8 @@ fail_keep_maxchild:
 	return ret;
 }
 
-static void hub_release(struct kref *kref)
+static void hub_release(struct usb_hub *hub)
 {
-	struct usb_hub *hub = container_of(kref, struct usb_hub, kref);
-
 	usb_put_intf(to_usb_interface(hub->intfdev));
 	kfree(hub);
 }
@@ -1575,18 +1559,12 @@ static void hub_disconnect(struct usb_interface *intf)
 	struct usb_device *hdev = interface_to_usbdev(intf);
 	int i;
 
-	/* Take the hub off the event list and don't let it be added again */
-	spin_lock_irq(&hub_event_lock);
-	if (!list_empty(&hub->event_list)) {
-		list_del_init(&hub->event_list);
-		usb_autopm_put_interface_no_suspend(intf);
-	}
-	hub->disconnected = 1;
-	spin_unlock_irq(&hub_event_lock);
-
 	/* Disconnect all children and quiesce the hub */
 	hub->error = 0;
 	hub_quiesce(hub, HUB_DISCONNECT);
+
+	if (cancel_work_sync(&hub->event_work))
+		usb_autopm_put_interface(intf);
 
 	usb_set_intfdata (intf, NULL);
 
@@ -1604,9 +1582,10 @@ static void hub_disconnect(struct usb_interface *intf)
 	kfree(hub->buffer);
 
 	pm_suspend_ignore_children(&intf->dev, false);
-	kref_put(&hub->kref, hub_release);
+	hub_release(hub);
 }
 
+static void hub_event(struct work_struct *);
 static int hub_probe(struct usb_interface *intf, const struct usb_device_id *id)
 {
 	struct usb_host_interface *desc;
@@ -1696,8 +1675,7 @@ descriptor_error:
 		return -ENOMEM;
 	}
 
-	kref_init(&hub->kref);
-	INIT_LIST_HEAD(&hub->event_list);
+	INIT_WORK(&hub->event_work, hub_event);
 	hub->intfdev = &intf->dev;
 	hub->hdev = hdev;
 	INIT_DELAYED_WORK(&hub->leds, led_work);
@@ -4613,46 +4591,21 @@ static void put_port_pm_sync(struct usb_port *port_dev)
 #define for_each_port_pm_sync(i, p, h) \
 	for (i = 1; (p = get_port_pm_sync(h, i)); i++, put_port_pm_sync(p))
 
-static void hub_events(void)
+static void hub_event(struct work_struct *w)
 {
-	struct list_head *tmp;
-	struct usb_device *hdev;
-	struct usb_port *port_dev;
-	struct usb_interface *intf;
-	struct usb_hub *hub;
-	struct device *hub_dev;
+	struct usb_hub *hub = container_of(w, struct usb_hub, event_work);
+	struct usb_device *hdev = hub->hdev;
+	struct device *hub_dev = hub->intfdev;
+	struct usb_interface *intf = to_usb_interface(hub_dev);
+	int i, ret;
 	u16 hubstatus;
 	u16 hubchange;
 	u16 portstatus;
 	u16 portchange;
-	int i, ret;
+	struct usb_port *port_dev;
 	int connect_change, wakeup_change;
 
-	/*
-	 *  We restart the list every time to avoid a deadlock with
-	 * deleting hubs downstream from this one. This should be
-	 * safe since we delete the hub from the event list.
-	 * Not the most efficient, but avoids deadlocks.
-	 */
-	while (1) {
-
-		/* Grab the first entry at the beginning of the list */
-		spin_lock_irq(&hub_event_lock);
-		if (list_empty(&hub_event_list)) {
-			spin_unlock_irq(&hub_event_lock);
-			break;
-		}
-
-		tmp = hub_event_list.next;
-		list_del_init(tmp);
-
-		hub = list_entry(tmp, struct usb_hub, event_list);
-		kref_get(&hub->kref);
-		spin_unlock_irq(&hub_event_lock);
-
-		hdev = hub->hdev;
-		hub_dev = hub->intfdev;
-		intf = to_usb_interface(hub_dev);
+	do {
 		dev_dbg(hub_dev, "state %d ports %d chg %04x evt %04x\n",
 				hdev->state, hdev->maxchild,
 				/* NOTE: expects max 15 ports... */
@@ -4662,8 +4615,6 @@ static void hub_events(void)
 		/* Lock the device, then check to see if we were
 		 * disconnected while waiting for the lock to succeed. */
 		usb_lock_device(hdev);
-		if (unlikely(hub->disconnected))
-			goto loop_disconnected;
 
 		/* If the hub has died, clean up after it */
 		if (hdev->state == USB_STATE_NOTATTACHED) {
@@ -4861,31 +4812,8 @@ static void hub_events(void)
 		 * kick_khubd() and allow autosuspend.
 		 */
 		usb_autopm_put_interface(intf);
- loop_disconnected:
 		usb_unlock_device(hdev);
-		kref_put(&hub->kref, hub_release);
-
-	} /* end while (1) */
-}
-
-static int hub_thread(void *__unused)
-{
-	/* khubd needs to be freezable to avoid intefering with USB-PERSIST
-	 * port handover.  Otherwise it might see that a full-speed device
-	 * was gone before the EHCI controller had handed its port over to
-	 * the companion full-speed controller.
-	 */
-	set_freezable();
-
-	do {
-		hub_events();
-		wait_event_freezable(khubd_wait,
-				!list_empty(&hub_event_list) ||
-				kthread_should_stop());
-	} while (!kthread_should_stop() || !list_empty(&hub_event_list));
-
-	pr_debug("%s: khubd exiting\n", usbcore_name);
-	return 0;
+	} while (0);
 }
 
 static const struct usb_device_id hub_id_table[] = {
@@ -4925,8 +4853,9 @@ int usb_hub_init(void)
 		return -1;
 	}
 
-	khubd_task = kthread_run(hub_thread, NULL, "khubd");
-	if (!IS_ERR(khubd_task))
+	khubd_wq = create_freezable_workqueue("khubd");
+
+	if (khubd_wq)
 		return 0;
 
 	/* Fall through if kernel_thread failed */
@@ -4938,8 +4867,6 @@ int usb_hub_init(void)
 
 void usb_hub_cleanup(void)
 {
-	kthread_stop(khubd_task);
-
 	/*
 	 * Hub resources are freed for us by usb_deregister. It calls
 	 * usb_driver_purge on every device which in turn calls that
@@ -4948,7 +4875,8 @@ void usb_hub_cleanup(void)
 	 * individual hub resources. -greg
 	 */
 	usb_deregister(&hub_driver);
-} /* usb_hub_cleanup() */
+	destroy_workqueue(khubd_wq);
+}
 
 static int descriptors_changed(struct usb_device *udev,
 		struct usb_device_descriptor *old_device_descriptor,

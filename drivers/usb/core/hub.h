@@ -27,7 +27,6 @@
 struct usb_hub {
 	struct device		*intfdev;	/* the "interface" device */
 	struct usb_device	*hdev;
-	struct kref		kref;
 	struct urb		*urb;		/* for interrupt polling pipe */
 
 	/* buffer for urb ... with extra space in case of babble */
@@ -41,7 +40,7 @@ struct usb_hub {
 	int			error;		/* last reported error */
 	int			nerrors;	/* track consecutive errors */
 
-	struct list_head	event_list;	/* hubs w/data or errs ready */
+	struct work_struct	event_work;	/* hubs w/data or errs ready */
 	unsigned long		event_bits[1];	/* status change bitmask */
 	unsigned long		change_bits[1];	/* ports with logical connect
 							status change */
@@ -66,7 +65,6 @@ struct usb_hub {
 
 	unsigned		limited_power:1;
 	unsigned		quiescing:1;
-	unsigned		disconnected:1;
 
 	unsigned		quirk_check_port_auto_suspend:1;
 
