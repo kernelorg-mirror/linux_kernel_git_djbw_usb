@@ -77,18 +77,19 @@ static int usb_port_runtime_resume(struct device *dev)
 	struct usb_interface *intf = to_usb_interface(dev->parent);
 	struct usb_hub *hub = usb_hub_to_struct_hub(hdev);
 	int port1 = port_dev->portnum;
-	int retval;
+	int retval = 0;
 
 	if (!hub)
 		return -EINVAL;
 
 	usb_autopm_get_interface(intf);
-	retval = usb_set_port_feature(hdev, port1, USB_PORT_FEAT_POWER);
-	usb_autopm_put_interface(intf);
+	if (test_bit(port1, hub->poweroff_bits))
+		retval = usb_set_port_feature(hdev, port1, USB_PORT_FEAT_POWER);
 
 	/* no child? we're done recovering this port */
 	if (!port_dev->child)
 		usb_clear_port_poweroff(hub, port1);
+	usb_autopm_put_interface(intf);
 
 	return retval;
 }
@@ -125,7 +126,7 @@ static int usb_port_runtime_suspend(struct device *dev)
 		return -EINVAL;
 
 	if (power_on_reason(port_dev))
-		return -EAGAIN;
+		return 0;
 
 	usb_autopm_get_interface(intf);
 	usb_set_port_poweroff(hub, port1);

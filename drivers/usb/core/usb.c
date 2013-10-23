@@ -42,7 +42,7 @@
 #include <linux/mm.h>
 #include <linux/dma-mapping.h>
 
-#include "usb.h"
+#include "hub.h"
 
 
 const char *usbcore_name = "usbcore";
@@ -458,6 +458,8 @@ struct usb_device *usb_alloc_dev(struct usb_device *parent,
 		dev_set_name(&dev->dev, "usb%d", bus->busnum);
 		root_hub = 1;
 	} else {
+		struct usb_hub *hub = usb_hub_to_struct_hub(parent);
+
 		/* match any labeling on the hubs; it's one-based */
 		if (parent->devpath[0] == '0') {
 			snprintf(dev->devpath, sizeof dev->devpath,
@@ -476,7 +478,10 @@ struct usb_device *usb_alloc_dev(struct usb_device *parent,
 					(15 << ((parent->level - 1)*4));
 		}
 
-		dev->dev.parent = &parent->dev;
+		/* usb hierarchy is hub->device device-model hierarchy is
+		 * hub->intf->port->device
+		 */
+		dev->dev.parent = &hub->ports[port1 - 1]->dev;
 		dev_set_name(&dev->dev, "%d-%s", bus->busnum, dev->devpath);
 
 		/* hub driver sets up TT records */

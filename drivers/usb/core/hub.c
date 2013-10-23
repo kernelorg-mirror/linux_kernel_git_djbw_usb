@@ -1706,7 +1706,6 @@ descriptor_error:
 
 	usb_set_intfdata (intf, hub);
 	intf->needs_remote_wakeup = 1;
-	pm_suspend_ignore_children(&intf->dev, true);
 
 	if (hdev->speed == USB_SPEED_HIGH)
 		highspeed_hubs++;
@@ -2030,16 +2029,9 @@ void usb_disconnect(struct usb_device **pdev)
 	usb_hcd_synchronize_unlinks(udev);
 
 	if (udev->parent) {
-		struct usb_hub *hub = usb_hub_to_struct_hub(udev->parent);
-		struct usb_port	*port_dev = hub->ports[udev->portnum - 1];
+		struct usb_device *hdev = udev->parent;
 
-		sysfs_remove_link(&udev->dev.kobj, "port");
-		sysfs_remove_link(&port_dev->dev.kobj, "device");
-
-		if (!port_dev->did_runtime_put)
-			pm_runtime_put(&port_dev->dev);
-		else
-			port_dev->did_runtime_put = false;
+		sysfs_remove_link(&hdev->dev.kobj, dev_name(&udev->dev));
 	}
 
 	usb_remove_ep_devs(&udev->ep0);
@@ -2355,22 +2347,12 @@ int usb_new_device(struct usb_device *udev)
 
 	/* Create link files between child device and usb port device. */
 	if (udev->parent) {
-		struct usb_hub *hub = usb_hub_to_struct_hub(udev->parent);
-		struct usb_port	*port_dev = hub->ports[udev->portnum - 1];
+		struct usb_device *hdev = udev->parent;
 
-		err = sysfs_create_link(&udev->dev.kobj,
-				&port_dev->dev.kobj, "port");
+		err = sysfs_create_link(&hdev->dev.kobj, &udev->dev.kobj,
+					dev_name(&udev->dev));
 		if (err)
 			goto fail;
-
-		err = sysfs_create_link(&port_dev->dev.kobj,
-				&udev->dev.kobj, "device");
-		if (err) {
-			sysfs_remove_link(&udev->dev.kobj, "port");
-			goto fail;
-		}
-
-		pm_runtime_get_sync(&port_dev->dev);
 	}
 
 	(void) usb_create_ep_devs(&udev->dev, &udev->ep0, udev);
@@ -2959,7 +2941,6 @@ static unsigned wakeup_enabled_descendants(struct usb_device *udev)
 int usb_port_suspend(struct usb_device *udev, pm_message_t msg)
 {
 	struct usb_hub	*hub = usb_hub_to_struct_hub(udev->parent);
-	struct usb_port *port_dev = hub->ports[udev->portnum - 1];
 	int		port1 = udev->portnum;
 	int		status;
 	bool		really_suspend = true;
@@ -3051,11 +3032,6 @@ int usb_port_suspend(struct usb_device *udev, pm_message_t msg)
 			msleep(10);
 		}
 		usb_set_device_state(udev, USB_STATE_SUSPENDED);
-	}
-
-	if (status == 0) {
-		pm_runtime_put_sync(&port_dev->dev);
-		port_dev->did_runtime_put = true;
 	}
 
 	usb_mark_last_busy(hub->hdev);
@@ -3183,20 +3159,9 @@ static int finish_port_resume(struct usb_device *udev)
 int usb_port_resume(struct usb_device *udev, pm_message_t msg)
 {
 	struct usb_hub	*hub = usb_hub_to_struct_hub(udev->parent);
-	struct usb_port *port_dev = hub->ports[udev->portnum  - 1];
 	int		port1 = udev->portnum;
 	int		status;
 	u16		portchange, portstatus;
-
-	if (port_dev->did_runtime_put) {
-		status = pm_runtime_get_sync(&port_dev->dev);
-		port_dev->did_runtime_put = false;
-		if (status < 0) {
-			dev_dbg(&udev->dev, "can't resume usb port, status %d\n",
-					status);
-			return status;
-		}
-	}
 
 	/* Skip the initial Clear-Suspend step for a remote wakeup */
 	status = hub_port_status(hub, port1, &portstatus, &portchange);
@@ -3310,23 +3275,16 @@ static int hub_suspend(struct usb_interface *intf, pm_message_t msg)
 	unsigned		port1;
 	int			status;
 
-	/*
-	 * Warn if children aren't already suspended.
-	 * Also, add up the number of wakeup-enabled descendants.
-	 */
+	/* add up the number of wakeup-enabled descendants. */
 	hub->wakeup_enabled_descendants = 0;
 	for (port1 = 1; port1 <= hdev->maxchild; port1++) {
-		struct usb_device	*udev;
+		struct usb_device *udev;
 
-		udev = hub->ports[port1 - 1]->child;
-		if (udev && udev->can_submit) {
-			dev_warn(&intf->dev, "port %d nyet suspended\n", port1);
-			if (PMSG_IS_AUTO(msg))
-				return -EBUSY;
-		}
+		udev = usb_port_get_child(hub->ports[port1 - 1]);
 		if (udev)
 			hub->wakeup_enabled_descendants +=
 					wakeup_enabled_descendants(udev);
+		usb_port_put_child(udev);
 	}
 
 	if (hdev->do_remote_wakeup && hub->quirk_check_port_auto_suspend) {

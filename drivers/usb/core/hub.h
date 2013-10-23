@@ -84,7 +84,6 @@ struct usb_hub {
  * @port_owner: port's owner
  * @connect_type: port's connect type
  * @portnum: port index num based one
- * @did_runtime_put: port has done pm_runtime_put().
  */
 struct usb_port {
 	struct usb_device *child;
@@ -92,7 +91,6 @@ struct usb_port {
 	struct dev_state *port_owner;
 	enum usb_port_connect_type connect_type;
 	u8 portnum;
-	unsigned did_runtime_put:1;
 };
 
 #define to_usb_port(_dev) \
