@@ -114,8 +114,6 @@ static int usb_port_runtime_suspend(struct device *dev)
 	retval = usb_clear_port_feature(hdev, port1, USB_PORT_FEAT_POWER);
 	if (retval)
 		clear_bit(port1, hub->poweroff_bits);
-	usb_clear_port_feature(hdev, port1, USB_PORT_FEAT_C_CONNECTION);
-	usb_clear_port_feature(hdev, port1,	USB_PORT_FEAT_C_ENABLE);
 	usb_autopm_put_interface(intf);
 
 	return retval;
