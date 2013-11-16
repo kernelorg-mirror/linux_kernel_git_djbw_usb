@@ -4736,33 +4736,39 @@ static void port_event(struct usb_hub *hub, int port1)
 				USB_PORT_FEAT_C_PORT_CONFIG_ERROR);
 	}
 
-	if (hub_handle_remote_wakeup(hub, port1, portstatus, portchange))
-		connect_change = 1;
+	/* take port actions that require the port to be powered on */
+	if (pm_runtime_active(&port_dev->dev)) {
+		if (hub_handle_remote_wakeup(hub, port1,
+				portstatus, portchange))
+			connect_change = 1;
 
-	/*
-	 * Warm reset a USB3 protocol port if it's in
-	 * SS.Inactive state.
-	 */
-	if (hub_port_warm_reset_required(hub, portstatus)) {
-		int status;
+		/*
+		 * Warm reset a USB3 protocol port if it's in
+		 * SS.Inactive state.
+		 */
+		if (hub_port_warm_reset_required(hub, portstatus)) {
+			int status;
 
-		dev_dbg(hub_dev, "port%d: do warm reset\n", port1);
-		if (!udev || !(portstatus & USB_PORT_STAT_CONNECTION)
-				|| udev->state == USB_STATE_NOTATTACHED) {
-			status = hub_port_reset(hub, port1, NULL,
-					HUB_BH_RESET_TIME, true);
-			if (status < 0)
-				hub_port_disable(hub, port1, 1);
-		} else {
-			usb_lock_device(udev);
-			status = usb_reset_device(udev);
-			usb_unlock_device(udev);
-			connect_change = 0;
+			dev_dbg(hub_dev, "port%d: do warm reset\n", port1);
+			if (!udev || !(portstatus & USB_PORT_STAT_CONNECTION)
+					|| udev->state == USB_STATE_NOTATTACHED) {
+				status = hub_port_reset(hub, port1, NULL,
+							HUB_BH_RESET_TIME,
+							true);
+				if (status < 0)
+					hub_port_disable(hub, port1, 1);
+			} else {
+				usb_lock_device(udev);
+				status = usb_reset_device(udev);
+				usb_unlock_device(udev);
+				connect_change = 0;
+			}
 		}
-	}
 
-	if (connect_change)
-		hub_port_connect_change(hub, port1, portstatus, portchange);
+		if (connect_change)
+			hub_port_connect_change(hub, port1,
+					portstatus, portchange);
+	}
 }
 
 
@@ -4849,11 +4855,17 @@ static void hub_events(void)
 
 		/* deal with port status changes */
 		for (i = 1; i <= hdev->maxchild; i++) {
+			struct usb_port *port_dev = hub->ports[i - 1];
+
 			if (!test_bit(i, hub->busy_bits)
 					&& (test_and_clear_bit(i, hub->event_bits)
 					|| test_bit(i, hub->change_bits)
-					|| test_bit(i, hub->wakeup_bits)))
+					|| test_bit(i, hub->wakeup_bits))) {
+				pm_runtime_get_noresume(&port_dev->dev);
+				pm_runtime_barrier(&port_dev->dev);
 				port_event(hub, i);
+				pm_runtime_put_sync(&port_dev->dev);
+			}
 		}
 
 		/* deal with hub status changes */
