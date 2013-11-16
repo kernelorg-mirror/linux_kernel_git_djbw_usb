@@ -4652,10 +4652,37 @@ static int hub_handle_remote_wakeup(struct usb_hub *hub, unsigned int port,
 	return connect_change;
 }
 
+static struct usb_port *get_port_pm_sync(struct usb_hub *hub, int port1)
+{
+	struct usb_device *hdev = hub->hdev;
+
+	if (port1 <= hdev->maxchild) {
+		struct usb_port *port_dev = hub->ports[port1 - 1];
+
+		pm_runtime_get_noresume(&port_dev->dev);
+		pm_runtime_barrier(&port_dev->dev);
+		return port_dev;
+	}
+
+	return NULL;
+}
+
+static void put_port_pm_sync(struct usb_port *port_dev)
+{
+	if (!port_dev)
+		return;
+
+	pm_runtime_put_sync(&port_dev->dev);
+}
+
+#define for_each_port_pm_sync(i, p, h) \
+	for (i = 1; (p = get_port_pm_sync(h, i)); i++, put_port_pm_sync(p))
+
 static void hub_events(void)
 {
 	struct list_head *tmp;
 	struct usb_device *hdev;
+	struct usb_port *port_dev;
 	struct usb_interface *intf;
 	struct usb_hub *hub;
 	struct device *hub_dev;
@@ -4737,7 +4764,7 @@ static void hub_events(void)
 		}
 
 		/* deal with port status changes */
-		for (i = 1; i <= hdev->maxchild; i++) {
+		for_each_port_pm_sync(i, port_dev, hub) {
 			if (test_bit(i, hub->busy_bits))
 				continue;
 			connect_change = test_bit(i, hub->change_bits);
@@ -4776,8 +4803,7 @@ static void hub_events(void)
 				 * Works at least with mouse driver.
 				 */
 				if (!(portstatus & USB_PORT_STAT_ENABLE)
-				    && !connect_change
-				    && hub->ports[i - 1]->child) {
+				    && !connect_change && port_dev->child) {
 					dev_err (hub_dev,
 					    "port %i "
 					    "disabled by hub (EMI?), "
@@ -4839,8 +4865,7 @@ static void hub_events(void)
 			 */
 			if (hub_port_warm_reset_required(hub, portstatus)) {
 				int status;
-				struct usb_device *udev =
-					hub->ports[i - 1]->child;
+				struct usb_device *udev = port_dev->child;
 
 				dev_dbg(hub_dev, "warm reset port %d\n", i);
 				if (!udev || !(portstatus &
