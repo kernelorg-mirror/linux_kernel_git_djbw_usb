@@ -47,6 +47,7 @@ struct usb_hub {
 							status change */
 	unsigned long		busy_bits[1];	/* ports being reset or
 							resumed */
+	unsigned long		poweroff_bits[1]; /* ports logically off */
 	unsigned long		removed_bits[1]; /* ports with a "removed"
 							device present */
 	unsigned long		wakeup_bits[1];	/* ports that have signaled
@@ -106,20 +107,5 @@ extern void usb_hub_remove_port_device(struct usb_hub *hub,
 extern int usb_hub_set_port_power(struct usb_device *hdev, struct usb_hub *hub,
 		int port1, bool set);
 extern struct usb_hub *usb_hub_to_struct_hub(struct usb_device *hdev);
-extern int hub_port_debounce(struct usb_hub *hub, int port1,
-		bool must_be_connected);
 extern int usb_clear_port_feature(struct usb_device *hdev,
 		int port1, int feature);
-
-static inline int hub_port_debounce_be_connected(struct usb_hub *hub,
-		int port1)
-{
-	return hub_port_debounce(hub, port1, true);
-}
-
-static inline int hub_port_debounce_be_stable(struct usb_hub *hub,
-		int port1)
-{
-	return hub_port_debounce(hub, port1, false);
-}
-

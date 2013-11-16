@@ -1092,6 +1092,9 @@ static void hub_activate(struct usb_hub *hub, enum hub_activation_type type)
 		struct usb_device *udev = hub->ports[port1 - 1]->child;
 		u16 portstatus, portchange;
 
+		if (test_bit(port1, hub->poweroff_bits))
+			continue;
+
 		portstatus = portchange = 0;
 		status = hub_port_status(hub, port1, &portstatus, &portchange);
 		if (udev || (portstatus & USB_PORT_STAT_CONNECTION))
@@ -2783,8 +2786,14 @@ static int check_port_resume_type(struct usb_device *udev,
 		struct usb_hub *hub, int port1,
 		int status, unsigned portchange, unsigned portstatus)
 {
+	/* port power recovery, proceed to resetting the device */
+	if (test_bit(port1, hub->poweroff_bits)) {
+		status = 0;
+		udev->reset_resume = 1;
+	}
+
 	/* Is the device still present? */
-	if (status || port_is_suspended(hub, portstatus) ||
+	else if (status || port_is_suspended(hub, portstatus) ||
 			!port_is_power_on(hub, portstatus) ||
 			!(portstatus & USB_PORT_STAT_CONNECTION)) {
 		if (status >= 0)
@@ -3871,7 +3880,7 @@ EXPORT_SYMBOL_GPL(usb_enable_ltm);
  * every 25ms for transient disconnects.  When the port status has been
  * unchanged for 100ms it returns the port status.
  */
-int hub_port_debounce(struct usb_hub *hub, int port1, bool must_be_connected)
+int hub_port_debounce(struct usb_hub *hub, int port1)
 {
 	int ret;
 	int total_time, stable_time = 0;
@@ -3885,8 +3894,7 @@ int hub_port_debounce(struct usb_hub *hub, int port1, bool must_be_connected)
 
 		if (!(portchange & USB_PORT_STAT_C_CONNECTION) &&
 		     (portstatus & USB_PORT_STAT_CONNECTION) == connection) {
-			if (!must_be_connected ||
-			     (connection == USB_PORT_STAT_CONNECTION))
+			if (connection == USB_PORT_STAT_CONNECTION)
 				stable_time += HUB_DEBOUNCE_STEP;
 			if (stable_time >= HUB_DEBOUNCE_STABLE)
 				break;
@@ -4437,7 +4445,7 @@ static void hub_port_connect_change(struct usb_hub *hub, int port1,
 
 	if (portchange & (USB_PORT_STAT_C_CONNECTION |
 				USB_PORT_STAT_C_ENABLE)) {
-		status = hub_port_debounce_be_stable(hub, port1);
+		status = hub_port_debounce(hub, port1);
 		if (status < 0) {
 			if (status != -ENODEV && printk_ratelimit())
 				dev_err(hub_dev, "connect-debounce failed, "
@@ -4748,6 +4756,9 @@ static void hub_events(void)
 					USB_PORT_FEAT_C_CONNECTION);
 				connect_change = 1;
 			}
+
+			if (test_bit(i, hub->poweroff_bits))
+				continue;
 
 			if (portchange & USB_PORT_STAT_C_ENABLE) {
 				if (!connect_change)
@@ -5155,6 +5166,7 @@ static int usb_reset_and_verify_device(struct usb_device *udev)
 		if (ret >= 0 || ret == -ENOTCONN || ret == -ENODEV)
 			break;
 	}
+	clear_bit(port1, parent_hub->poweroff_bits);
 	clear_bit(port1, parent_hub->busy_bits);
 
 	if (ret < 0)
