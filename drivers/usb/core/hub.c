@@ -409,7 +409,7 @@ int usb_clear_port_feature(struct usb_device *hdev, int port1, int feature)
 /*
  * USB 2.0 spec Section 11.24.2.13
  */
-static int set_port_feature(struct usb_device *hdev, int port1, int feature)
+int usb_set_port_feature(struct usb_device *hdev, int port1, int feature)
 {
 	return usb_control_msg(hdev, usb_sndctrlpipe(hdev, 0),
 		USB_REQ_SET_FEATURE, USB_RT_PORT, feature, port1,
@@ -426,7 +426,7 @@ static void set_port_led(
 	int selector
 )
 {
-	int status = set_port_feature(hub->hdev, (selector << 8) | port1,
+	int status = usb_set_port_feature(hub->hdev, (selector << 8) | port1,
 			USB_PORT_FEAT_INDICATOR);
 	if (status < 0)
 		dev_dbg (hub->intfdev,
@@ -731,34 +731,6 @@ static void hub_tt_work(struct work_struct *work)
 }
 
 /**
- * usb_hub_set_port_power - control hub port's power state
- * @hdev: USB device belonging to the usb hub
- * @hub: target hub
- * @port1: port index
- * @set: expected status
- *
- * call this function to control port's power via setting or
- * clearing the port's PORT_POWER feature.
- *
- * Return: 0 if successful. A negative error code otherwise.
- */
-int usb_hub_set_port_power(struct usb_device *hdev, struct usb_hub *hub,
-			   int port1, bool set)
-{
-	int ret;
-	struct usb_port *port_dev = hub->ports[port1 - 1];
-
-	if (set)
-		ret = set_port_feature(hdev, port1, USB_PORT_FEAT_POWER);
-	else
-		ret = usb_clear_port_feature(hdev, port1, USB_PORT_FEAT_POWER);
-
-	if (!ret)
-		port_dev->power_is_on = set;
-	return ret;
-}
-
-/**
  * usb_hub_clear_tt_buffer - clear control/bulk TT state in high speed hub
  * @urb: an URB associated with the failed or incomplete split transaction
  *
@@ -836,11 +808,9 @@ static unsigned hub_power_on(struct usb_hub *hub, bool do_delay)
 		dev_dbg(hub->intfdev, "trying to enable port power on "
 				"non-switchable hub\n");
 	for (port1 = 1; port1 <= hub->hdev->maxchild; port1++)
-		if (hub->ports[port1 - 1]->power_is_on)
-			set_port_feature(hub->hdev, port1, USB_PORT_FEAT_POWER);
-		else
-			usb_clear_port_feature(hub->hdev, port1,
-						USB_PORT_FEAT_POWER);
+		if (!test_bit(port1, hub->poweroff_bits))
+			usb_set_port_feature(hub->hdev, port1,
+					     USB_PORT_FEAT_POWER);
 
 	/* Wait at least 100 msec for power to become stable */
 	delay = max(pgood_delay, (unsigned) 100);
@@ -872,7 +842,7 @@ static int hub_hub_status(struct usb_hub *hub,
 static int hub_set_port_link_state(struct usb_hub *hub, int port1,
 			unsigned int link_status)
 {
-	return set_port_feature(hub->hdev,
+	return usb_set_port_feature(hub->hdev,
 			port1 | (link_status << 3),
 			USB_PORT_FEAT_LINK_STATE);
 }
@@ -1177,17 +1147,10 @@ static void hub_activate(struct usb_hub *hub, enum hub_activation_type type)
 				set_bit(port1, hub->change_bits);
 
 		} else if (udev->persist_enabled) {
-			struct usb_port *port_dev = hub->ports[port1 - 1];
-
 #ifdef CONFIG_PM
 			udev->reset_resume = 1;
 #endif
-			/* Don't set the change_bits when the device
-			 * was powered off.
-			 */
-			if (port_dev->power_is_on)
-				set_bit(port1, hub->change_bits);
-
+			set_bit(port1, hub->change_bits);
 		} else {
 			/* The power session is gone; tell khubd */
 			usb_set_device_state(udev, USB_STATE_NOTATTACHED);
@@ -2680,7 +2643,7 @@ static int hub_port_reset(struct usb_hub *hub, int port1,
 
 	/* Reset the port */
 	for (i = 0; i < PORT_RESET_TRIES; i++) {
-		status = set_port_feature(hub->hdev, port1, (warm ?
+		status = usb_set_port_feature(hub->hdev, port1, (warm ?
 					USB_PORT_FEAT_BH_PORT_RESET :
 					USB_PORT_FEAT_RESET));
 		if (status == -ENODEV) {
@@ -3037,7 +3000,7 @@ int usb_port_suspend(struct usb_device *udev, pm_message_t msg)
 	 * descendants is enabled for remote wakeup.
 	 */
 	else if (PMSG_IS_AUTO(msg) || wakeup_enabled_descendants(udev) > 0)
-		status = set_port_feature(hub->hdev, port1,
+		status = usb_set_port_feature(hub->hdev, port1,
 				USB_PORT_FEAT_SUSPEND);
 	else {
 		really_suspend = false;
@@ -3364,7 +3327,7 @@ static int hub_suspend(struct usb_interface *intf, pm_message_t msg)
 	if (hub_is_superspeed(hdev) && hdev->do_remote_wakeup) {
 		/* Enable hub to send remote wakeup for all ports. */
 		for (port1 = 1; port1 <= hdev->maxchild; port1++) {
-			status = set_port_feature(hdev,
+			status = usb_set_port_feature(hdev,
 					port1 |
 					USB_PORT_FEAT_REMOTE_WAKE_CONNECT |
 					USB_PORT_FEAT_REMOTE_WAKE_DISCONNECT |
@@ -3595,7 +3558,7 @@ static int usb_set_lpm_timeout(struct usb_device *udev,
 		return -EINVAL;
 	}
 
-	ret = set_port_feature(udev->parent,
+	ret = usb_set_port_feature(udev->parent,
 			USB_PORT_LPM_TIMEOUT(timeout) | udev->portnum,
 			feature);
 	if (ret < 0) {
@@ -4465,7 +4428,7 @@ static void hub_port_connect_change(struct usb_hub *hub, int port1,
 		/* maybe switch power back on (e.g. root hub was reset) */
 		if ((wHubCharacteristics & HUB_CHAR_LPSM) < 2
 				&& !port_is_power_on(hub, portstatus))
-			set_port_feature(hdev, port1, USB_PORT_FEAT_POWER);
+			usb_set_port_feature(hdev, port1, USB_PORT_FEAT_POWER);
 
 		if (portstatus & USB_PORT_STAT_ENABLE)
 			goto done;

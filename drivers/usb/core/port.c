@@ -83,7 +83,7 @@ static int usb_port_runtime_resume(struct device *dev)
 		return -EINVAL;
 
 	usb_autopm_get_interface(intf);
-	retval = usb_hub_set_port_power(hdev, hub, port1, true);
+	retval = usb_set_port_feature(hdev, port1, USB_PORT_FEAT_POWER);
 	usb_autopm_put_interface(intf);
 
 	/* no child? we're done recovering this port */
@@ -111,7 +111,7 @@ static int usb_port_runtime_suspend(struct device *dev)
 
 	set_bit(port1, hub->poweroff_bits);
 	usb_autopm_get_interface(intf);
-	retval = usb_hub_set_port_power(hdev, hub, port1, false);
+	retval = usb_clear_port_feature(hdev, port1, USB_PORT_FEAT_POWER);
 	if (retval)
 		clear_bit(port1, hub->poweroff_bits);
 	usb_clear_port_feature(hdev, port1, USB_PORT_FEAT_C_CONNECTION);
@@ -148,7 +148,6 @@ int usb_hub_create_port_device(struct usb_hub *hub, int port1)
 
 	hub->ports[port1 - 1] = port_dev;
 	port_dev->portnum = port1;
-	port_dev->power_is_on = true;
 	port_dev->dev.parent = hub->intfdev;
 	port_dev->dev.groups = port_dev_group;
 	port_dev->dev.type = &usb_port_device_type;

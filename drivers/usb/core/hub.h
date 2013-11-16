@@ -84,7 +84,6 @@ struct usb_hub {
  * @port_owner: port's owner
  * @connect_type: port's connect type
  * @portnum: port index num based one
- * @power_is_on: port's power state
  * @did_runtime_put: port has done pm_runtime_put().
  */
 struct usb_port {
@@ -93,7 +92,6 @@ struct usb_port {
 	struct dev_state *port_owner;
 	enum usb_port_connect_type connect_type;
 	u8 portnum;
-	unsigned power_is_on:1;
 	unsigned did_runtime_put:1;
 };
 
@@ -104,8 +102,8 @@ extern int usb_hub_create_port_device(struct usb_hub *hub,
 		int port1);
 extern void usb_hub_remove_port_device(struct usb_hub *hub,
 		int port1);
-extern int usb_hub_set_port_power(struct usb_device *hdev, struct usb_hub *hub,
-		int port1, bool set);
 extern struct usb_hub *usb_hub_to_struct_hub(struct usb_device *hdev);
 extern int usb_clear_port_feature(struct usb_device *hdev,
+		int port1, int feature);
+extern int usb_set_port_feature(struct usb_device *hdev,
 		int port1, int feature);
