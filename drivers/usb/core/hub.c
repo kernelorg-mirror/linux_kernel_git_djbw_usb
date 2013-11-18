@@ -5063,6 +5063,28 @@ static int descriptors_changed(struct usb_device *udev,
 	return changed;
 }
 
+void usb_assign_port_poweroff(struct usb_hub *hub, int port1, int val)
+{
+	/* usb_port_runtime_suspend may run concurrently with
+	 * usb_reset_and_verify_device or usb_port_runtime_resume
+	 */
+	static DEFINE_SPINLOCK(lock);
+	struct usb_interface *intf = to_usb_interface(hub->intfdev);
+
+	spin_lock(&lock);
+	if (val) {
+		struct usb_device *hdev = hub->hdev;
+
+		set_bit(port1, hub->poweroff_bits);
+		if (hweight32(hub->poweroff_bits[0]) == hdev->maxchild)
+			intf->needs_remote_wakeup = 0;
+	} else {
+		intf->needs_remote_wakeup = 1;
+		clear_bit(port1, hub->poweroff_bits);
+	}
+	spin_unlock(&lock);
+}
+
 /**
  * usb_reset_and_verify_device - perform a USB port reset to reinitialize a device
  * @udev: device to reset (not in SUSPENDED or NOTATTACHED state)
@@ -5154,7 +5176,7 @@ static int usb_reset_and_verify_device(struct usb_device *udev)
 		if (ret >= 0 || ret == -ENOTCONN || ret == -ENODEV)
 			break;
 	}
-	clear_bit(port1, parent_hub->poweroff_bits);
+	usb_clear_port_poweroff(parent_hub, port1);
 	clear_bit(port1, parent_hub->busy_bits);
 
 	if (ret < 0)

@@ -88,7 +88,7 @@ static int usb_port_runtime_resume(struct device *dev)
 
 	/* no child? we're done recovering this port */
 	if (!port_dev->child)
-		clear_bit(port1, hub->poweroff_bits);
+		usb_clear_port_poweroff(hub, port1);
 
 	return retval;
 }
@@ -109,11 +109,11 @@ static int usb_port_runtime_suspend(struct device *dev)
 			== PM_QOS_FLAGS_ALL)
 		return -EAGAIN;
 
-	set_bit(port1, hub->poweroff_bits);
 	usb_autopm_get_interface(intf);
+	usb_set_port_poweroff(hub, port1);
 	retval = usb_clear_port_feature(hdev, port1, USB_PORT_FEAT_POWER);
 	if (retval)
-		clear_bit(port1, hub->poweroff_bits);
+		usb_clear_port_poweroff(hub, port1);
 	usb_autopm_put_interface(intf);
 
 	return retval;
