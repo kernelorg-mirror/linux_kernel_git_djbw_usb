@@ -93,6 +93,25 @@ static int usb_port_runtime_resume(struct device *dev)
 	return retval;
 }
 
+static const char *power_on_reason(struct usb_port *port_dev)
+{
+	s32 flag = PM_QOS_FLAG_NO_POWER_OFF;
+	const char *reason = NULL;
+	struct usb_device *udev;
+
+	if (dev_pm_qos_flags(&port_dev->dev, flag) == PM_QOS_FLAGS_ALL)
+		return "pm_qos_no_power_off";
+
+	udev = usb_port_get_child(port_dev);
+	if (udev && udev->do_remote_wakeup)
+		reason = "wakeup enabled";
+	else if (udev && !udev->persist_enabled)
+		reason = "persist disabled";
+	usb_port_put_child(udev);
+
+	return reason;
+}
+
 static int usb_port_runtime_suspend(struct device *dev)
 {
 	struct usb_port *port_dev = to_usb_port(dev);
@@ -105,8 +124,7 @@ static int usb_port_runtime_suspend(struct device *dev)
 	if (!hub)
 		return -EINVAL;
 
-	if (dev_pm_qos_flags(&port_dev->dev, PM_QOS_FLAG_NO_POWER_OFF)
-			== PM_QOS_FLAGS_ALL)
+	if (power_on_reason(port_dev))
 		return -EAGAIN;
 
 	usb_autopm_get_interface(intf);

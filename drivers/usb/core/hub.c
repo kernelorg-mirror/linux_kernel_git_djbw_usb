@@ -2066,6 +2066,20 @@ void usb_disconnect(struct usb_device **pdev)
 	put_device(&udev->dev);
 }
 
+/* outside of khubd context a device may be deleted at any time */
+struct usb_device *usb_port_get_child(struct usb_port *port_dev)
+{
+	struct usb_device *udev = NULL;
+
+	spin_lock_irq(&device_state_lock);
+	udev = port_dev->child;
+	if (udev)
+		get_device(&udev->dev);
+	spin_unlock_irq(&device_state_lock);
+
+	return udev;
+}
+
 #ifdef CONFIG_USB_ANNOUNCE_NEW_DEVICES
 static void show_string(struct usb_device *udev, char *id, char *string)
 {
@@ -3039,7 +3053,7 @@ int usb_port_suspend(struct usb_device *udev, pm_message_t msg)
 		usb_set_device_state(udev, USB_STATE_SUSPENDED);
 	}
 
-	if (status == 0 && !udev->do_remote_wakeup && udev->persist_enabled) {
+	if (status == 0) {
 		pm_runtime_put_sync(&port_dev->dev);
 		port_dev->did_runtime_put = true;
 	}

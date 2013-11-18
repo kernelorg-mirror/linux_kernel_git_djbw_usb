@@ -110,3 +110,10 @@ extern int usb_set_port_feature(struct usb_device *hdev,
 extern void usb_assign_port_poweroff(struct usb_hub *hub, int port1, int val);
 #define usb_set_port_poweroff(h, p) usb_assign_port_poweroff(h, p, 1)
 #define usb_clear_port_poweroff(h, p) usb_assign_port_poweroff(h, p, 0)
+extern struct usb_device *usb_port_get_child(struct usb_port *port_dev);
+static inline void usb_port_put_child(struct usb_device *udev)
+{
+	if (!udev)
+		return;
+	put_device(&udev->dev);
+}
