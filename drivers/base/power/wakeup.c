@@ -14,6 +14,7 @@
 #include <linux/suspend.h>
 #include <linux/seq_file.h>
 #include <linux/debugfs.h>
+#include <linux/pm_runtime.h>
 #include <trace/events/power.h>
 
 #include "power.h"
@@ -335,10 +336,16 @@ EXPORT_SYMBOL_GPL(device_init_wakeup);
  */
 int device_set_wakeup_enable(struct device *dev, bool enable)
 {
+	int rc;
+
 	if (!dev || !dev->power.can_wakeup)
 		return -EINVAL;
 
-	return enable ? device_wakeup_enable(dev) : device_wakeup_disable(dev);
+	pm_runtime_get_sync(dev);
+	rc = enable ? device_wakeup_enable(dev) : device_wakeup_disable(dev);
+	pm_runtime_put_sync(dev);
+
+	return rc;
 }
 EXPORT_SYMBOL_GPL(device_set_wakeup_enable);
 
