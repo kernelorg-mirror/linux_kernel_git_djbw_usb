@@ -148,6 +148,25 @@ Description:
 		The file will read "hotplug", "wired" and "not used" if the
 		information is available, and "unknown" otherwise.
 
+What:		/sys/bus/usb/devices/.../(hub interface)/portX/power/power_state
+Date:		November 2013
+Contact:	Dan Williams <dan.j.williams@intel.com>
+Description:
+		There are several gating factors that prevent a usb_port
+		from being powered down.  Let userspace discover what is
+		keeping a port powered.
+
+		'active': attached child device is actively using the
+			  port
+		'pm_qos_no_power_off': child inactive, pm qos flag keeps
+				       power enabled
+		'wakeup enabled': child inactive, port kept powered to
+				  handle remote wakeup events
+		'persist disabled': child inactive, but child device
+				    will not cleanly recover from a
+				    suspend/resume cycle
+		'off': port power is off
+
 What:		/sys/bus/usb/devices/.../power/usb2_lpm_l1_timeout
 Date:		May 2013
 Contact:	Mathias Nyman <mathias.nyman@linux.intel.com>

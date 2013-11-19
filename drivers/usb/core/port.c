@@ -152,6 +152,55 @@ struct device_type usb_port_device_type = {
 	.pm =		&usb_port_pm_ops,
 };
 
+#ifdef CONFIG_PM
+static ssize_t power_state_show(struct device *dev,
+				    struct device_attribute *attr, char *buf)
+{
+	const char *state;
+	struct usb_port *port_dev = to_usb_port(dev);
+	struct usb_device *child = usb_port_get_child(port_dev);
+
+	if (child) {
+		pm_runtime_barrier(&child->dev);
+		put_device(&child->dev);
+	}
+
+	pm_runtime_barrier(dev);
+
+	if (pm_runtime_active(dev))
+		state = "active";
+	else
+		state = power_on_reason(port_dev);
+
+	if (!state)
+		state = "off";
+
+	return sprintf(buf, "%s\n", state);
+}
+static DEVICE_ATTR_RO(power_state);
+
+static int add_port_power_state(struct usb_port *port_dev)
+{
+	return sysfs_add_file_to_group(&port_dev->dev.kobj,
+				       &dev_attr_power_state.attr,
+				       power_group_name);
+}
+
+static void remove_port_power_state(struct usb_port *port_dev)
+{
+	sysfs_remove_file_from_group(&port_dev->dev.kobj,
+				     &dev_attr_power_state.attr,
+				     power_group_name);
+}
+#else
+static int add_port_power_state(struct usb_port *port_dev)
+{
+	return 0;
+}
+
+static void remove_port_power_state(struct usb_port *port_dev) { }
+#endif
+
 int usb_hub_create_port_device(struct usb_hub *hub, int port1)
 {
 	struct usb_port *port_dev = NULL;
@@ -174,6 +223,8 @@ int usb_hub_create_port_device(struct usb_hub *hub, int port1)
 	if (retval)
 		goto error_register;
 
+	add_port_power_state(port_dev);
+
 	pm_runtime_set_active(&port_dev->dev);
 
 	/* It would be dangerous if user space couldn't
@@ -193,9 +244,10 @@ exit:
 	return retval;
 }
 
-void usb_hub_remove_port_device(struct usb_hub *hub,
-				       int port1)
+void usb_hub_remove_port_device(struct usb_hub *hub, int port1)
 {
-	device_unregister(&hub->ports[port1 - 1]->dev);
-}
+	struct usb_port *port_dev = hub->ports[port1 - 1];
 
+	remove_port_power_state(port_dev);
+	device_unregister(&port_dev->dev);
+}
