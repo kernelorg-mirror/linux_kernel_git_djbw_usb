@@ -160,6 +160,8 @@ Description:
 			  port
 		'pm_qos_no_power_off': child inactive, pm qos flag keeps
 				       power enabled
+		'hotplug': child inactive, remaining powered to detect
+			   hotplug events
 		'wakeup enabled': child inactive, port kept powered to
 				  handle remote wakeup events
 		'persist disabled': child inactive, but child device

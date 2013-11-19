@@ -46,7 +46,38 @@ static ssize_t connect_type_show(struct device *dev,
 
 	return sprintf(buf, "%s\n", result);
 }
-static DEVICE_ATTR_RO(connect_type);
+
+static ssize_t connect_type_store(struct device *dev, struct device_attribute *attr,
+				  const char *buf, size_t len)
+{
+	struct usb_port *port_dev = to_usb_port(dev);
+	ssize_t sz = len;
+	int i;
+	struct action { const char *str; enum usb_port_connect_type type; };
+	static const struct action action[] = {
+		{ .str = "hotplug", .type = USB_PORT_CONNECT_TYPE_HOT_PLUG, },
+		{ .str = "hardwired", .type = USB_PORT_CONNECT_TYPE_HARD_WIRED },
+	};
+
+	if (buf[len-1] == '\n' || buf[len-1] == '\0')
+		sz--;
+
+	for (i = 0; i < ARRAY_SIZE(action); i++) {
+		const struct action *act = &action[i];
+
+		if (sz == strlen(act->str)
+		    && strncmp(buf, act->str, sz) == 0) {
+			pm_runtime_get_sync(&port_dev->dev);
+			port_dev->connect_type = act->type;
+			pm_runtime_put_sync(&port_dev->dev);
+			return len;
+		}
+	}
+
+	return -EINVAL;
+}
+
+static DEVICE_ATTR_RW(connect_type);
 
 static struct attribute *port_dev_attrs[] = {
 	&dev_attr_connect_type.attr,
@@ -102,6 +133,9 @@ static const char *power_on_reason(struct usb_port *port_dev)
 
 	if (dev_pm_qos_flags(&port_dev->dev, flag) == PM_QOS_FLAGS_ALL)
 		return "pm_qos_no_power_off";
+
+	if (port_dev->connect_type < USB_PORT_CONNECT_TYPE_HARD_WIRED)
+		return "hotplug";
 
 	udev = usb_port_get_child(port_dev);
 	if (udev && udev->do_remote_wakeup)
