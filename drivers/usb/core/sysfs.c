@@ -303,9 +303,12 @@ static ssize_t persist_store(struct device *dev, struct device_attribute *attr,
 	if (sscanf(buf, "%d", &value) != 1)
 		return -EINVAL;
 
+	pm_runtime_get_sync(dev);
 	usb_lock_device(udev);
 	udev->persist_enabled = !!value;
 	usb_unlock_device(udev);
+	pm_runtime_put_sync(dev);
+
 	return count;
 }
 static DEVICE_ATTR_RW(persist);
