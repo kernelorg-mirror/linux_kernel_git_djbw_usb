@@ -97,7 +97,22 @@ static void usb_port_device_release(struct device *dev)
 {
 	struct usb_port *port_dev = to_usb_port(dev);
 
+	cancel_work_sync(&port_dev->ratelimit_work);
 	kfree(port_dev);
+}
+
+static void pm_ping_child(struct work_struct *w)
+{
+	struct usb_port *port_dev;
+	struct usb_device *udev;
+
+	port_dev = container_of(w, typeof(*port_dev), ratelimit_work);
+	udev = usb_port_get_child(port_dev);
+	if (udev) {
+		pm_runtime_get_sync(&udev->dev);
+		pm_runtime_put_autosuspend(&udev->dev);
+	}
+	usb_port_put_child(udev);
 }
 
 #ifdef CONFIG_PM_RUNTIME
@@ -117,9 +132,13 @@ static int usb_port_runtime_resume(struct device *dev)
 	if (test_bit(port1, hub->poweroff_bits))
 		retval = usb_set_port_feature(hdev, port1, USB_PORT_FEAT_POWER);
 
-	/* no child? we're done recovering this port */
+	/* no child? we're done recovering this port, otherwise try to
+	 * recover the device connection to rate limit power toggling
+	 */
 	if (!port_dev->child)
 		usb_clear_port_poweroff(hub, port1);
+	else
+		schedule_work(&port_dev->ratelimit_work);
 	usb_autopm_put_interface(intf);
 
 	return retval;
@@ -156,6 +175,7 @@ static int usb_port_runtime_suspend(struct device *dev)
 	int port1 = port_dev->portnum;
 	int retval;
 
+	flush_work(&port_dev->ratelimit_work);
 	if (!hub)
 		return -EINVAL;
 
@@ -251,6 +271,7 @@ int usb_hub_create_port_device(struct usb_hub *hub, int port1)
 	port_dev->dev.parent = hub->intfdev;
 	port_dev->dev.groups = port_dev_group;
 	port_dev->dev.type = &usb_port_device_type;
+	INIT_WORK(&port_dev->ratelimit_work, pm_ping_child);
 	dev_set_name(&port_dev->dev, "port%d", port1);
 
 	retval = device_register(&port_dev->dev);
