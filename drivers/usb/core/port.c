@@ -21,6 +21,7 @@
 
 #include "hub.h"
 
+static DEFINE_MUTEX(peer_lock);
 static const struct attribute_group *port_dev_group[];
 
 static ssize_t connect_type_show(struct device *dev,
@@ -146,9 +147,72 @@ struct device_type usb_port_device_type = {
 	.pm =		&usb_port_pm_ops,
 };
 
+/*
+ * Set the default peer port for root hubs.  Assumes the primary_hcd is
+ * registered first
+ */
+static struct usb_port *find_default_peer(struct usb_hub *hub, int port1)
+{
+	struct usb_device *hdev = hub->hdev;
+	struct usb_port *peer = NULL;
+
+	if (!hdev->parent) {
+		struct usb_hub *peer_hub;
+		struct usb_device *peer_hdev;
+		struct usb_hcd *hcd = bus_to_hcd(hdev->bus);
+		struct usb_hcd *peer_hcd = hcd->primary_hcd;
+
+		if (!peer_hcd || hcd == peer_hcd)
+			return NULL;
+
+		peer_hdev = peer_hcd->self.root_hub;
+		peer_hub = usb_hub_to_struct_hub(peer_hdev);
+		if (peer_hub && port1 <= peer_hdev->maxchild)
+			peer = peer_hub->ports[port1 - 1];
+	}
+
+	return peer;
+}
+
+static void link_peers(struct usb_port *left, struct usb_port *right)
+{
+	if (left->peer == right && right->peer == left)
+		return;
+
+	if (left->peer || right->peer) {
+		struct usb_port *lpeer = left->peer;
+		struct usb_port *rpeer = right->peer;
+
+		WARN(1, "failed to peer %s and %s (%s -> %s) (%s -> %s)\n",
+			dev_name(&left->dev), dev_name(&right->dev),
+			dev_name(&left->dev),
+			lpeer ? dev_name(&lpeer->dev) : "[none]",
+			dev_name(&right->dev),
+			rpeer ? dev_name(&rpeer->dev) : "[none]");
+		return;
+	}
+
+	get_device(&right->dev);
+	left->peer = right;
+	get_device(&left->dev);
+	right->peer = left;
+}
+
+static void unlink_peers(struct usb_port *left, struct usb_port *right)
+{
+	WARN(right->peer != left || left->peer != right,
+			"%s and %s are not peers?\n",
+			dev_name(&left->dev), dev_name(&right->dev));
+
+	put_device(&left->dev);
+	right->peer = NULL;
+	put_device(&right->dev);
+	left->peer = NULL;
+}
+
 int usb_hub_create_port_device(struct usb_hub *hub, int port1)
 {
-	struct usb_port *port_dev = NULL;
+	struct usb_port *port_dev, *peer;
 	int retval;
 
 	port_dev = kzalloc(sizeof(*port_dev), GFP_KERNEL);
@@ -163,11 +227,17 @@ int usb_hub_create_port_device(struct usb_hub *hub, int port1)
 	port_dev->dev.parent = hub->intfdev;
 	port_dev->dev.groups = port_dev_group;
 	port_dev->dev.type = &usb_port_device_type;
-	dev_set_name(&port_dev->dev, "port%d", port1);
-
+	dev_set_name(&port_dev->dev, "%s-port%d", dev_name(&hub->hdev->dev),
+			port1);
 	retval = device_register(&port_dev->dev);
 	if (retval)
 		goto error_register;
+
+	mutex_lock(&peer_lock);
+	peer = find_default_peer(hub, port1);
+	if (peer)
+		link_peers(port_dev, peer);
+	mutex_unlock(&peer_lock);
 
 	pm_runtime_set_active(&port_dev->dev);
 
@@ -190,9 +260,16 @@ exit:
 	return retval;
 }
 
-void usb_hub_remove_port_device(struct usb_hub *hub,
-				       int port1)
+void usb_hub_remove_port_device(struct usb_hub *hub, int port1)
 {
-	device_unregister(&hub->ports[port1 - 1]->dev);
-}
+	struct usb_port *port_dev = hub->ports[port1 - 1];
+	struct usb_port *peer;
 
+	mutex_lock(&peer_lock);
+	peer = port_dev->peer;
+	if (peer)
+		unlink_peers(port_dev, peer);
+	mutex_unlock(&peer_lock);
+
+	device_unregister(&port_dev->dev);
+}
