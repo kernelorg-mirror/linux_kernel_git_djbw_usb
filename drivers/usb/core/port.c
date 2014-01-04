@@ -148,15 +148,19 @@ struct device_type usb_port_device_type = {
 };
 
 /*
- * Set the default peer port for root hubs.  Assumes the primary_hcd is
- * registered first
+ * Set the default peer port for root hubs.  Platform firmware will have
+ * already set the peer if tier-mismatch is present.  Assumes the
+ * primary_hcd is registered first
  */
 static struct usb_port *find_default_peer(struct usb_hub *hub, int port1)
 {
-	struct usb_device *hdev = hub->hdev;
+	struct usb_device *hdev = hub ? hub->hdev : NULL;
 	struct usb_device *peer_hdev;
 	struct usb_port *peer = NULL;
 	struct usb_hub *peer_hub;
+
+	if (!hub)
+		return NULL;
 
 	if (!hdev->parent) {
 		struct usb_hcd *hcd = bus_to_hcd(hdev->bus);
@@ -228,9 +232,154 @@ static void unlink_peers(struct usb_port *left, struct usb_port *right)
 	left->peer = NULL;
 }
 
+/**
+ * for_each_child_port() - invoke 'fn' on all usb_port instances beneath 'hdev'
+ * @hdev: potential hub usb_device (validated by usb_hub_to_struct_hub)
+ * @level: track recursion level to stop after reaching USB spec max depth
+ * @p: parameter to pass to 'fn'
+ * @fn: routine to invoke on each port
+ *
+ * Recursively iterate all ports (depth-first) beneath 'hdev' until 'fn'
+ * returns a non-NULL usb_port or all ports have been visited.
+ */
+static struct usb_port *for_each_child_port(struct usb_device *hdev, int level,
+		void *p, struct usb_port * (*fn)(struct usb_port *, void *))
+{
+	struct usb_hub *hub = usb_hub_to_struct_hub(hdev);
+	int port1;
+
+#define MAX_HUB_DEPTH 5
+	if (!hub || level > MAX_HUB_DEPTH)
+		return NULL;
+
+	level++;
+	for (port1 = 1; port1 <= hdev->maxchild; port1++) {
+		struct usb_port *ret, *port_dev = hub->ports[port1 - 1];
+
+		ret = fn(port_dev, p);
+		if (ret)
+			return ret;
+		ret = for_each_child_port(port_dev->child, level, p, fn);
+		if (ret)
+			return ret;
+	}
+
+	return NULL;
+}
+
+static struct usb_port *do_match_location(struct usb_port *port_dev, void *_loc)
+{
+	struct usb_port_location *loc = _loc;
+
+	if (memcmp(&port_dev->location, loc, sizeof(*loc)) == 0)
+		return port_dev;
+	return NULL;
+}
+
+static struct usb_port *find_port_by_location(struct usb_device *hdev,
+		struct usb_port_location *loc)
+{
+	return for_each_child_port(hdev, 1, loc, do_match_location);
+}
+
+static struct usb_port *do_default_link(struct usb_port *port_dev, void *p)
+{
+	struct usb_device *hdev = to_usb_device(port_dev->dev.parent->parent);
+	struct usb_hub *hub = usb_hub_to_struct_hub(hdev);
+	struct usb_port *peer;
+
+	peer = find_default_peer(hub, port_dev->portnum);
+
+	/*
+	 * Assign the peer, but since we may have run
+	 * enumerate_dependent_peers() on the peer bus it may already be
+	 * set
+	 */
+	if (peer && !port_dev->peer)
+		link_peers(port_dev, peer);
+	return NULL;
+}
+
+static void enumerate_dependent_peers(struct usb_device *hdev)
+{
+	for_each_child_port(hdev, 1, NULL, do_default_link);
+}
+
+static struct usb_port *do_unlink_peers(struct usb_port *port_dev, void *p)
+{
+	if (port_dev->peer)
+		unlink_peers(port_dev, port_dev->peer);
+	return NULL;
+}
+
+static void invalidate_dependent_peers(struct usb_port *port_dev)
+{
+	unlink_peers(port_dev, port_dev->peer);
+	for_each_child_port(port_dev->child, 1, NULL, do_unlink_peers);
+}
+
+void usb_set_hub_port_location(struct usb_device *hdev, int port1,
+		u32 cookie)
+{
+	struct usb_hub *hub = usb_hub_to_struct_hub(hdev);
+	struct usb_hcd *hcd = bus_to_hcd(hdev->bus);
+	struct usb_hcd *peer_hcd = hcd->shared_hcd;
+	int enum_port_dev = 0, enum_peer = 0;
+	struct usb_port *peer, *port_dev;
+	struct usb_device *peer_hdev;
+
+	if (cookie == 0)
+		return;
+
+	if (!hub)
+		return;
+
+	port_dev = hub->ports[port1 - 1];
+	port_dev->location.cookie = cookie;
+
+	/*
+	 * Once we set the location we need to check if this invalidates
+	 * the current peer mapping for this port
+	 */
+	if (!peer_hcd)
+		return;
+
+	mutex_lock(&peer_lock);
+	peer_hdev = peer_hcd->self.root_hub;
+	peer = find_port_by_location(peer_hdev, &port_dev->location);
+
+	/*
+	 * If the peer we found does not match the current one then we
+	 * need to invalidate all the peer relationships beneath each
+	 * port
+	 */
+	if (port_dev->peer && port_dev->peer != peer) {
+		invalidate_dependent_peers(port_dev);
+		enum_port_dev = 1;
+	}
+	if (peer->peer && peer->peer != port_dev) {
+		invalidate_dependent_peers(peer);
+		enum_peer = 1;
+	}
+
+	link_peers(port_dev, peer);
+
+	/*
+	 * If a peer relationship was invalidated then we need to
+	 * re-enumerate all the descendants.  We descend both 'port_dev'
+	 * and 'peer' since tier-mismatch implies a mismatch in the
+	 * number of descendants.
+	 */
+	if (enum_port_dev)
+		enumerate_dependent_peers(port_dev->child);
+	if (enum_peer)
+		enumerate_dependent_peers(peer->child);
+	mutex_unlock(&peer_lock);
+}
+
 int usb_hub_create_port_device(struct usb_hub *hub, int port1)
 {
-	struct usb_port *port_dev, *peer;
+	struct usb_port *port_dev;
 	int retval;
 
 	port_dev = kzalloc(sizeof(*port_dev), GFP_KERNEL);
@@ -252,9 +401,12 @@ int usb_hub_create_port_device(struct usb_hub *hub, int port1)
 		goto error_register;
 
 	mutex_lock(&peer_lock);
-	peer = find_default_peer(hub, port1);
-	if (peer)
-		link_peers(port_dev, peer);
+	if (!port_dev->peer) {
+		struct usb_port *peer = find_default_peer(hub, port1);
+
+		if (peer)
+			link_peers(port_dev, peer);
+	}
 	mutex_unlock(&peer_lock);
 
 	pm_runtime_set_active(&port_dev->dev);
