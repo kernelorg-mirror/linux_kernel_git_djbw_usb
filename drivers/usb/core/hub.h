@@ -129,6 +129,11 @@ static inline bool hub_is_port_power_switchable(struct usb_hub *hub)
 	return (le16_to_cpu(hcs) & HUB_CHAR_LPSM) < HUB_CHAR_NO_LPSM;
 }
 
+static inline int hub_is_superspeed(struct usb_device *hdev)
+{
+	return hdev->descriptor.bDeviceProtocol == USB_HUB_PR_SS;
+}
+
 static inline int hub_port_debounce_be_connected(struct usb_hub *hub,
 		int port1)
 {

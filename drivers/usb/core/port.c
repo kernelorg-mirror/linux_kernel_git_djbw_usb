@@ -77,11 +77,19 @@ static int usb_port_runtime_resume(struct device *dev)
 	struct usb_device *hdev = to_usb_device(dev->parent->parent);
 	struct usb_interface *intf = to_usb_interface(dev->parent);
 	struct usb_hub *hub = usb_hub_to_struct_hub(hdev);
+	struct usb_port *peer = port_dev->peer;
 	int port1 = port_dev->portnum;
 	int retval;
 
 	if (!hub)
 		return -EINVAL;
+
+	/*
+	 * Power on our usb3 peer before this usb2 port to prevent a usb3
+	 * device from degrading to its usb2 connection
+	 */
+	if (!hub_is_superspeed(hdev) && peer)
+		pm_runtime_get_sync(&peer->dev);
 
 	usb_autopm_get_interface(intf);
 	set_bit(port1, hub->busy_bits);
@@ -104,6 +112,7 @@ static int usb_port_runtime_resume(struct device *dev)
 
 	clear_bit(port1, hub->busy_bits);
 	usb_autopm_put_interface(intf);
+
 	return retval;
 }
 
@@ -113,6 +122,7 @@ static int usb_port_runtime_suspend(struct device *dev)
 	struct usb_device *hdev = to_usb_device(dev->parent->parent);
 	struct usb_interface *intf = to_usb_interface(dev->parent);
 	struct usb_hub *hub = usb_hub_to_struct_hub(hdev);
+	struct usb_port *peer = port_dev->peer;
 	int port1 = port_dev->portnum;
 	int retval;
 
@@ -130,6 +140,15 @@ static int usb_port_runtime_suspend(struct device *dev)
 	usb_clear_port_feature(hdev, port1,	USB_PORT_FEAT_C_ENABLE);
 	clear_bit(port1, hub->busy_bits);
 	usb_autopm_put_interface(intf);
+
+	/*
+	 * Our peer usb3 port may now be able to suspend, asynchronously
+	 * queue a suspend request to observe that this usb2 peer port
+	 * is now off.
+	 */
+	if (!hub_is_superspeed(hdev) && peer)
+		pm_runtime_put(&peer->dev);
+
 	return retval;
 }
 #endif
@@ -196,8 +215,30 @@ static struct usb_port *find_default_peer(struct usb_hub *hub, int port1)
 	return peer;
 }
 
+/*
+ * Modifying ->peer affects usb_port_runtime_{suspend|resume} so make
+ * sure devices are active before the change and re-evaluate
+ * afterwards
+ */
+static void pre_modify_peers(struct usb_port *left, struct usb_port *right)
+{
+	get_device(&left->dev);
+	get_device(&right->dev);
+	pm_runtime_get_sync(&left->dev);
+	pm_runtime_get_sync(&right->dev);
+}
+
+static void post_modify_peers(struct usb_port *left, struct usb_port *right)
+{
+	pm_runtime_put(&left->dev);
+	pm_runtime_put(&right->dev);
+	put_device(&left->dev);
+	put_device(&right->dev);
+}
+
 static int link_peers(struct usb_port *left, struct usb_port *right)
 {
+	struct usb_device *ldev, *rdev;
 	int rc;
 
 	if (left->peer == right && right->peer == left)
@@ -225,10 +266,27 @@ static int link_peers(struct usb_port *left, struct usb_port *right)
 		return rc;
 	}
 
+	pre_modify_peers(left, right);
 	get_device(&right->dev);
 	left->peer = right;
 	get_device(&left->dev);
 	right->peer = left;
+
+	/*
+	 * Ports are peer linked, hold a reference on the superspeed
+	 * port which the hispeed port drops when it suspends.  This
+	 * ensures that superspeed ports only suspend after their
+	 * hispeed peer.
+	 */
+	ldev = to_usb_device(left->dev.parent->parent);
+	rdev = to_usb_device(right->dev.parent->parent);
+	if (hub_is_superspeed(ldev))
+		pm_runtime_get_noresume(&left->dev);
+	else {
+		WARN_ON(!hub_is_superspeed(rdev));
+		pm_runtime_get_noresume(&right->dev);
+	}
+	post_modify_peers(left, right);
 
 	return 0;
 }
@@ -249,16 +307,34 @@ static void link_peers_report(struct usb_port *left, struct usb_port *right)
 
 static void unlink_peers(struct usb_port *left, struct usb_port *right)
 {
+	struct usb_device *ldev, *rdev;
+
 	WARN(right->peer != left || left->peer != right,
 			"%s and %s are not peers?\n",
 			dev_name(&left->dev), dev_name(&right->dev));
 
+	pre_modify_peers(left, right);
 	sysfs_remove_link(&left->dev.kobj, "peer");
 	put_device(&left->dev);
 	right->peer = NULL;
 	sysfs_remove_link(&right->dev.kobj, "peer");
 	put_device(&right->dev);
 	left->peer = NULL;
+
+	/*
+	 * Ports are no longer peer linked, drop the reference that
+	 * keeps the superspeed port (may be 'right' or 'left') powered
+	 * when its peer is active
+	 */
+	ldev = to_usb_device(left->dev.parent->parent);
+	rdev = to_usb_device(right->dev.parent->parent);
+	if (hub_is_superspeed(ldev))
+		pm_runtime_put_noidle(&left->dev);
+	else {
+		WARN_ON(!hub_is_superspeed(rdev));
+		pm_runtime_put_noidle(&right->dev);
+	}
+	post_modify_peers(left, right);
 }
 
 /**
