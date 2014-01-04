@@ -154,11 +154,11 @@ struct device_type usb_port_device_type = {
 static struct usb_port *find_default_peer(struct usb_hub *hub, int port1)
 {
 	struct usb_device *hdev = hub->hdev;
+	struct usb_device *peer_hdev;
 	struct usb_port *peer = NULL;
+	struct usb_hub *peer_hub;
 
 	if (!hdev->parent) {
-		struct usb_hub *peer_hub;
-		struct usb_device *peer_hdev;
 		struct usb_hcd *hcd = bus_to_hcd(hdev->bus);
 		struct usb_hcd *peer_hcd = hcd->primary_hcd;
 
@@ -169,6 +169,24 @@ static struct usb_port *find_default_peer(struct usb_hub *hub, int port1)
 		peer_hub = usb_hub_to_struct_hub(peer_hdev);
 		if (peer_hub && port1 <= peer_hdev->maxchild)
 			peer = peer_hub->ports[port1 - 1];
+	} else {
+		struct usb_port *upstream;
+		struct usb_device *parent = hdev->parent;
+		struct usb_hub *parent_hub = usb_hub_to_struct_hub(parent);
+
+		if (!parent_hub)
+			return NULL;
+
+		upstream = parent_hub->ports[hdev->portnum - 1];
+		if (!upstream->peer)
+			return NULL;
+
+		peer_hdev = upstream->peer->child;
+		peer_hub = usb_hub_to_struct_hub(peer_hdev);
+		if (!peer_hub || port1 > peer_hdev->maxchild)
+			return NULL;
+
+		peer = peer_hub->ports[port1 - 1];
 	}
 
 	return peer;
