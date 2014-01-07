@@ -196,10 +196,12 @@ static struct usb_port *find_default_peer(struct usb_hub *hub, int port1)
 	return peer;
 }
 
-static void link_peers(struct usb_port *left, struct usb_port *right)
+static int link_peers(struct usb_port *left, struct usb_port *right)
 {
+	int rc;
+
 	if (left->peer == right && right->peer == left)
-		return;
+		return 0;
 
 	if (left->peer || right->peer) {
 		struct usb_port *lpeer = left->peer;
@@ -211,13 +213,38 @@ static void link_peers(struct usb_port *left, struct usb_port *right)
 			lpeer ? dev_name(&lpeer->dev) : "[none]",
 			dev_name(&right->dev),
 			rpeer ? dev_name(&rpeer->dev) : "[none]");
-		return;
+		return -EBUSY;
+	}
+
+	rc = sysfs_create_link(&left->dev.kobj, &right->dev.kobj, "peer");
+	if (rc)
+		return rc;
+	rc = sysfs_create_link(&right->dev.kobj, &left->dev.kobj, "peer");
+	if (rc) {
+		sysfs_remove_link(&left->dev.kobj, "peer");
+		return rc;
 	}
 
 	get_device(&right->dev);
 	left->peer = right;
 	get_device(&left->dev);
 	right->peer = left;
+
+	return 0;
+}
+
+static void link_peers_report(struct usb_port *left, struct usb_port *right)
+{
+	int rc;
+
+	rc = link_peers(left, right);
+	if (rc == 0) {
+		dev_dbg(&left->dev, "peered to %s\n", dev_name(&right->dev));
+	} else {
+		dev_warn(&left->dev, "failed to peer to %s (%d)\n",
+				dev_name(&right->dev), rc);
+		pr_warn_once("usb: port power management may be unreliable\n");
+	}
 }
 
 static void unlink_peers(struct usb_port *left, struct usb_port *right)
@@ -226,8 +253,10 @@ static void unlink_peers(struct usb_port *left, struct usb_port *right)
 			"%s and %s are not peers?\n",
 			dev_name(&left->dev), dev_name(&right->dev));
 
+	sysfs_remove_link(&left->dev.kobj, "peer");
 	put_device(&left->dev);
 	right->peer = NULL;
+	sysfs_remove_link(&right->dev.kobj, "peer");
 	put_device(&right->dev);
 	left->peer = NULL;
 }
@@ -296,7 +325,7 @@ static struct usb_port *do_default_link(struct usb_port *port_dev, void *p)
 	 * set
 	 */
 	if (peer && !port_dev->peer)
-		link_peers(port_dev, peer);
+		link_peers_report(port_dev, peer);
 	return NULL;
 }
 
@@ -362,7 +391,7 @@ void usb_set_hub_port_location(struct usb_device *hdev, int port1,
 		enum_peer = 1;
 	}
 
-	link_peers(port_dev, peer);
+	link_peers_report(port_dev, peer);
 
 	/*
 	 * If a peer relationship was invalidated then we need to
@@ -405,7 +434,7 @@ int usb_hub_create_port_device(struct usb_hub *hub, int port1)
 		struct usb_port *peer = find_default_peer(hub, port1);
 
 		if (peer)
-			link_peers(port_dev, peer);
+			link_peers_report(port_dev, peer);
 	}
 	mutex_unlock(&peer_lock);
 
