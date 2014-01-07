@@ -2512,10 +2512,12 @@ static int hub_port_reset(struct usb_hub *hub, int port1,
 /* Is a USB 3.0 port in the Inactive or Compliance Mode state?
  * Port worm reset is required to recover
  */
-static bool hub_port_warm_reset_required(struct usb_hub *hub, u16 portstatus)
+static bool hub_port_warm_reset_required(struct usb_hub *hub, int port1,
+					 u16 portstatus)
 {
 	return hub_is_superspeed(hub->hdev) &&
-		(((portstatus & USB_PORT_STAT_LINK_STATE) ==
+		(test_bit(port1, hub->warm_reset_bits) ||
+		((portstatus & USB_PORT_STAT_LINK_STATE) ==
 		  USB_SS_PORT_LS_SS_INACTIVE) ||
 		 ((portstatus & USB_PORT_STAT_LINK_STATE) ==
 		  USB_SS_PORT_LS_COMP_MOD)) ;
@@ -2555,7 +2557,7 @@ static int hub_port_wait_reset(struct usb_hub *hub, int port1,
 	if ((portstatus & USB_PORT_STAT_RESET))
 		return -EBUSY;
 
-	if (hub_port_warm_reset_required(hub, portstatus))
+	if (hub_port_warm_reset_required(hub, port1, portstatus))
 		return -ENOTCONN;
 
 	/* Device went away? */
@@ -2654,8 +2656,9 @@ static int hub_port_reset(struct usb_hub *hub, int port1,
 		if (status < 0)
 			goto done;
 
-		if (hub_port_warm_reset_required(hub, portstatus))
+		if (hub_port_warm_reset_required(hub, port1, portstatus))
 			warm = true;
+		clear_bit(port1, hub->warm_reset_bits);
 	}
 
 	/* Reset the port */
@@ -2693,7 +2696,8 @@ static int hub_port_reset(struct usb_hub *hub, int port1,
 					&portstatus, &portchange) < 0)
 				goto done;
 
-			if (!hub_port_warm_reset_required(hub, portstatus))
+			if (!hub_port_warm_reset_required(hub, port1,
+					portstatus))
 				goto done;
 
 			/*
@@ -2766,8 +2770,13 @@ static int check_port_resume_type(struct usb_device *udev,
 		struct usb_hub *hub, int port1,
 		int status, unsigned portchange, unsigned portstatus)
 {
+	/* Is a warm reset needed to recover the connection? */
+	if (udev->reset_resume
+		&& hub_port_warm_reset_required(hub, port1, portstatus)) {
+		/* pass */;
+	}
 	/* Is the device still present? */
-	if (status || port_is_suspended(hub, portstatus) ||
+	else if (status || port_is_suspended(hub, portstatus) ||
 			!port_is_power_on(hub, portstatus) ||
 			!(portstatus & USB_PORT_STAT_CONNECTION)) {
 		if (status >= 0)
@@ -3911,7 +3920,7 @@ int hub_port_debounce(struct usb_hub *hub, int port1, bool must_be_connected)
 		"debounce: port %d: total %dms stable %dms status 0x%x\n",
 		port1, total_time, stable_time, portstatus);
 
-	if (stable_time < HUB_DEBOUNCE_STABLE)
+	if (stable_time < HUB_DEBOUNCE_STABLE && !must_be_connected)
 		return -ETIMEDOUT;
 	return portstatus;
 }
@@ -4800,7 +4809,7 @@ static void port_event(struct usb_hub *hub, int port1)
 		 * Warm reset a USB3 protocol port if it's in
 		 * SS.Inactive state.
 		 */
-		if (hub_port_warm_reset_required(hub, portstatus)) {
+		if (hub_port_warm_reset_required(hub, port1, portstatus)) {
 			int status;
 
 			dev_dbg(hub_dev, "port%d: do warm reset\n", port1);
