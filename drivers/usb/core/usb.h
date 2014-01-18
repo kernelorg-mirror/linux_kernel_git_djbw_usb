@@ -113,6 +113,12 @@ static inline int usb_autoresume_device(struct usb_device *udev)
 
 static inline int usb_remote_wakeup(struct usb_device *udev)
 {
+	/*
+	 * In the PM_RUNTIME=n case we still bounce the lock to keep
+	 * usb_remote_wakeup() as a flush for locked device operations
+	 */
+	usb_lock_device(udev);
+	usb_unlock_device(udev);
 	return 0;
 }
 
