@@ -590,9 +590,11 @@ void usb_kick_khubd(struct usb_device *hdev)
  * USB 3.0 hubs do not report the port link state change from U3 to U0 when the
  * device initiates resume, so the USB core will not receive notice of the
  * resume through the normal hub interrupt URB.
+ *
+ * This is also called by usb_port_runtime_resume() to arrange for the child
+ * device to be woken up as part of the power session recovery for the port.
  */
-void usb_wakeup_notification(struct usb_device *hdev,
-		unsigned int portnum)
+void usb_wakeup_notification(struct usb_device *hdev, unsigned int port1)
 {
 	struct usb_hub *hub;
 
@@ -601,7 +603,10 @@ void usb_wakeup_notification(struct usb_device *hdev,
 
 	hub = usb_hub_to_struct_hub(hdev);
 	if (hub) {
-		set_bit(portnum, hub->wakeup_bits);
+		struct usb_port *port_dev = hub->ports[port1 - 1];
+
+		if (!test_and_set_bit(port1, hub->wakeup_bits))
+			pm_runtime_get(&port_dev->dev);
 		kick_khubd(hub);
 	}
 }
@@ -4648,27 +4653,32 @@ static void hub_port_connect_change(struct usb_hub *hub, int port1,
 
 /* Returns 1 if there was a remote wakeup and a connect status change. */
 static int hub_handle_remote_wakeup(struct usb_hub *hub, unsigned int port,
-		u16 portstatus, u16 portchange)
+		u16 portstatus, u16 portchange, int wakeup_change)
 		__must_hold(&port_dev->status_lock)
 {
 	struct usb_port *port_dev = hub->ports[port - 1];
+	int connect_change = 0, do_wakeup = 1;
 	struct usb_device *hdev;
 	struct usb_device *udev;
-	int connect_change = 0;
 	int ret;
 
 	hdev = hub->hdev;
 	udev = port_dev->child;
 	if (!hub_is_superspeed(hdev)) {
 		if (!(portchange & USB_PORT_STAT_C_SUSPEND))
-			return 0;
+			do_wakeup = 0;
 		usb_clear_port_feature(hdev, port, USB_PORT_FEAT_C_SUSPEND);
 	} else {
 		if (!udev || udev->state != USB_STATE_SUSPENDED ||
 				 (portstatus & USB_PORT_STAT_LINK_STATE) !=
 				 USB_SS_PORT_LS_U0)
-			return 0;
+			do_wakeup = 0;
 	}
+
+	if (wakeup_change || do_wakeup)
+		/* pass */;
+	else
+		return 0;
 
 	if (udev) {
 		/* TRSMRCY = 10 msec */
@@ -4699,7 +4709,11 @@ static void port_event(struct usb_hub *hub, int port1)
 	u16 portstatus, portchange;
 
 	connect_change = test_bit(port1, hub->change_bits);
-	wakeup_change = test_and_clear_bit(port1, hub->wakeup_bits);
+	if (test_and_clear_bit(port1, hub->wakeup_bits)) {
+		/* balance usb_wakeup_notification(), we won't suspend here */
+		pm_runtime_put(&port_dev->dev);
+		wakeup_change = 1;
+	}
 
 	if (hub_port_status(hub, port1, &portstatus, &portchange) < 0)
 		return;
@@ -4766,9 +4780,12 @@ static void port_event(struct usb_hub *hub, int port1)
 
 	/* take port actions that require the port to be powered on */
 	if (pm_runtime_active(&port_dev->dev)) {
-		if (hub_handle_remote_wakeup(hub, port1,
-				portstatus, portchange))
-			connect_change = 1;
+		/*
+		 * There will be a wakeup pending if the device signalled it,
+		 * or if we are re-powering a port
+		 */
+		connect_change |= hub_handle_remote_wakeup(hub, port1,
+				portstatus, portchange, wakeup_change);
 
 		/*
 		 * Warm reset a USB3 protocol port if it's in

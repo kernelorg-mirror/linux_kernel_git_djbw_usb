@@ -104,6 +104,8 @@ static int usb_port_runtime_resume(struct device *dev)
 		if (retval < 0)
 			dev_dbg(&port_dev->dev, "can't get reconnection after setting port  power on, status %d\n",
 					retval);
+
+		usb_wakeup_notification(hdev, port1);
 		retval = 0;
 	}
 
