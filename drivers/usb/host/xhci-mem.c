@@ -40,14 +40,15 @@ static struct xhci_segment *xhci_segment_alloc(struct xhci_hcd *xhci,
 					unsigned int cycle_state, gfp_t flags)
 {
 	struct xhci_segment *seg;
-	dma_addr_t	dma;
 	int		i;
 
 	seg = kzalloc(sizeof *seg, flags);
 	if (!seg)
 		return NULL;
 
-	seg->trbs = dma_pool_alloc(xhci->segment_pool, flags, &dma);
+	seg->dev = xhci_to_dev(xhci);
+	seg->trbs = dma_alloc_coherent(seg->dev, TRB_SEGMENT_SIZE,
+			&seg->dma, flags);
 	if (!seg->trbs) {
 		kfree(seg);
 		return NULL;
@@ -59,33 +60,43 @@ static struct xhci_segment *xhci_segment_alloc(struct xhci_hcd *xhci,
 		for (i = 0; i < TRBS_PER_SEGMENT; i++)
 			seg->trbs[i].link.control |= cpu_to_le32(TRB_CYCLE);
 	}
-	seg->dma = dma;
 	seg->next = NULL;
 
 	return seg;
 }
 
-static void xhci_segment_free(struct xhci_hcd *xhci, struct xhci_segment *seg)
+static void xhci_segment_free_work(struct work_struct *w)
 {
+	struct xhci_segment *seg = container_of(w, typeof(*seg), work);
+
 	if (seg->trbs) {
-		dma_pool_free(xhci->segment_pool, seg->trbs, seg->dma);
+		dma_free_coherent(seg->dev, TRB_SEGMENT_SIZE, seg->trbs,
+				seg->dma);
 		seg->trbs = NULL;
 	}
+	put_device(seg->dev);
 	kfree(seg);
 }
 
-static void xhci_free_segments_for_ring(struct xhci_hcd *xhci,
-				struct xhci_segment *first)
+static void xhci_segment_free(struct xhci_segment *seg)
+{
+	INIT_WORK(&seg->work, xhci_segment_free_work);
+	get_device(seg->dev);
+	schedule_work(&seg->work);
+}
+
+static void xhci_free_segments_for_ring(struct xhci_segment *first)
 {
 	struct xhci_segment *seg;
 
 	seg = first->next;
 	while (seg != first) {
 		struct xhci_segment *next = seg->next;
-		xhci_segment_free(xhci, seg);
+
+		xhci_segment_free(seg);
 		seg = next;
 	}
-	xhci_segment_free(xhci, first);
+	xhci_segment_free(first);
 }
 
 /*
@@ -273,7 +284,7 @@ static int xhci_update_stream_mapping(struct xhci_ring *ring, gfp_t mem_flags)
 }
 
 /* XXX: Do we need the hcd structure in all these functions? */
-void xhci_ring_free(struct xhci_hcd *xhci, struct xhci_ring *ring)
+void xhci_ring_free(struct xhci_ring *ring)
 {
 	if (!ring)
 		return;
@@ -281,7 +292,7 @@ void xhci_ring_free(struct xhci_hcd *xhci, struct xhci_ring *ring)
 	if (ring->first_seg) {
 		if (ring->type == TYPE_STREAM)
 			xhci_remove_stream_mapping(ring);
-		xhci_free_segments_for_ring(xhci, ring->first_seg);
+		xhci_free_segments_for_ring(ring->first_seg);
 	}
 
 	kfree(ring);
@@ -336,7 +347,7 @@ static int xhci_alloc_segments_for_ring(struct xhci_hcd *xhci,
 			prev = *first;
 			while (prev) {
 				next = prev->next;
-				xhci_segment_free(xhci, prev);
+				xhci_segment_free(prev);
 				prev = next;
 			}
 			return -ENOMEM;
@@ -411,7 +422,7 @@ void xhci_free_or_cache_endpoint_ring(struct xhci_hcd *xhci,
 				virt_dev->num_rings_cached,
 				(virt_dev->num_rings_cached > 1) ? "s" : "");
 	} else {
-		xhci_ring_free(xhci, virt_dev->eps[ep_index].ring);
+		xhci_ring_free(virt_dev->eps[ep_index].ring);
 		xhci_dbg(xhci, "Ring cache full (%d rings), "
 				"freeing ring\n",
 				virt_dev->num_rings_cached);
@@ -482,7 +493,7 @@ int xhci_ring_expansion(struct xhci_hcd *xhci, struct xhci_ring *ring,
 		struct xhci_segment *next;
 		do {
 			next = first->next;
-			xhci_segment_free(xhci, first);
+			xhci_segment_free(first);
 			if (first == last)
 				break;
 			first = next;
@@ -723,7 +734,7 @@ struct xhci_stream_info *xhci_alloc_stream_info(struct xhci_hcd *xhci,
 
 		ret = xhci_update_stream_mapping(cur_ring, mem_flags);
 		if (ret) {
-			xhci_ring_free(xhci, cur_ring);
+			xhci_ring_free(cur_ring);
 			stream_info->stream_rings[cur_stream] = NULL;
 			goto cleanup_rings;
 		}
@@ -741,7 +752,7 @@ cleanup_rings:
 	for (cur_stream = 1; cur_stream < num_streams; cur_stream++) {
 		cur_ring = stream_info->stream_rings[cur_stream];
 		if (cur_ring) {
-			xhci_ring_free(xhci, cur_ring);
+			xhci_ring_free(cur_ring);
 			stream_info->stream_rings[cur_stream] = NULL;
 		}
 	}
@@ -809,7 +820,7 @@ void xhci_free_stream_info(struct xhci_hcd *xhci,
 			cur_stream++) {
 		cur_ring = stream_info->stream_rings[cur_stream];
 		if (cur_ring) {
-			xhci_ring_free(xhci, cur_ring);
+			xhci_ring_free(cur_ring);
 			stream_info->stream_rings[cur_stream] = NULL;
 		}
 	}
@@ -930,7 +941,7 @@ void xhci_free_virt_device(struct xhci_hcd *xhci, int slot_id)
 
 	for (i = 0; i < 31; ++i) {
 		if (dev->eps[i].ring)
-			xhci_ring_free(xhci, dev->eps[i].ring);
+			xhci_ring_free(dev->eps[i].ring);
 		if (dev->eps[i].stream_info)
 			xhci_free_stream_info(xhci,
 					dev->eps[i].stream_info);
@@ -951,7 +962,7 @@ void xhci_free_virt_device(struct xhci_hcd *xhci, int slot_id)
 
 	if (dev->ring_cache) {
 		for (i = 0; i < dev->num_rings_cached; i++)
-			xhci_ring_free(xhci, dev->ring_cache[i]);
+			xhci_ring_free(dev->ring_cache[i]);
 		kfree(dev->ring_cache);
 	}
 
@@ -1801,14 +1812,14 @@ void xhci_mem_cleanup(struct xhci_hcd *xhci)
 	xhci->erst.entries = NULL;
 	xhci_dbg_trace(xhci, trace_xhci_dbg_init, "Freed ERST");
 	if (xhci->event_ring)
-		xhci_ring_free(xhci, xhci->event_ring);
+		xhci_ring_free(xhci->event_ring);
 	xhci->event_ring = NULL;
 	xhci_dbg_trace(xhci, trace_xhci_dbg_init, "Freed event ring");
 
 	if (xhci->lpm_command)
 		xhci_free_command(xhci, xhci->lpm_command);
 	if (xhci->cmd_ring)
-		xhci_ring_free(xhci, xhci->cmd_ring);
+		xhci_ring_free(xhci->cmd_ring);
 	xhci->cmd_ring = NULL;
 	xhci_dbg_trace(xhci, trace_xhci_dbg_init, "Freed command ring");
 	xhci_cleanup_command_queue(xhci);
@@ -1825,11 +1836,6 @@ void xhci_mem_cleanup(struct xhci_hcd *xhci)
 
 	for (i = 1; i < MAX_HC_SLOTS; ++i)
 		xhci_free_virt_device(xhci, i);
-
-	if (xhci->segment_pool)
-		dma_pool_destroy(xhci->segment_pool);
-	xhci->segment_pool = NULL;
-	xhci_dbg_trace(xhci, trace_xhci_dbg_init, "Freed segment pool");
 
 	if (xhci->device_pool)
 		dma_pool_destroy(xhci->device_pool);
@@ -2363,20 +2369,10 @@ int xhci_mem_init(struct xhci_hcd *xhci, gfp_t flags)
 			(unsigned long long)xhci->dcbaa->dma, xhci->dcbaa);
 	xhci_write_64(xhci, dma, &xhci->op_regs->dcbaa_ptr);
 
-	/*
-	 * Initialize the ring segment pool.  The ring must be a contiguous
-	 * structure comprised of TRBs.  The TRBs must be 16 byte aligned,
-	 * however, the command ring segment needs 64-byte aligned segments
-	 * and our use of dma addresses in the trb_address_map radix tree needs
-	 * TRB_SEGMENT_SIZE alignment, so we pick the greater alignment need.
-	 */
-	xhci->segment_pool = dma_pool_create("xHCI ring segments", dev,
-			TRB_SEGMENT_SIZE, TRB_SEGMENT_SIZE, xhci->page_size);
-
 	/* See Table 46 and Note on Figure 55 */
 	xhci->device_pool = dma_pool_create("xHCI input/output contexts", dev,
 			2112, 64, xhci->page_size);
-	if (!xhci->segment_pool || !xhci->device_pool)
+	if (!xhci->device_pool)
 		goto fail;
 
 	/* Linear stream context arrays don't have any boundary restrictions,

@@ -2799,7 +2799,7 @@ void xhci_reset_bandwidth(struct usb_hcd *hcd, struct usb_device *udev)
 	/* Free any rings allocated for added endpoints */
 	for (i = 0; i < 31; ++i) {
 		if (virt_dev->eps[i].new_ring) {
-			xhci_ring_free(xhci, virt_dev->eps[i].new_ring);
+			xhci_ring_free(virt_dev->eps[i].new_ring);
 			virt_dev->eps[i].new_ring = NULL;
 		}
 	}

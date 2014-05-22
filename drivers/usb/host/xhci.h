@@ -1261,15 +1261,17 @@ union xhci_trb {
 #define NEC_FW_MAJOR(p)		(((p) >> 8) & 0xff)
 
 /*
- * TRBS_PER_SEGMENT must be a multiple of 4,
- * since the command ring is 64-byte aligned.
- * It must also be greater than 16.
+ * The ring sgement must be a contiguous structure comprised of TRBs
+ * (16-byte data structures).  The TRBs must be 16 byte aligned,
+ * however, the command ring segment needs 64-byte aligned segments and
+ * our use of dma addresses in the trb_address_map radix tree needs
+ * TRB_SEGMENT_SIZE alignment.
  */
-#define TRBS_PER_SEGMENT	64
+#define TRB_SEGMENT_SIZE	PAGE_SIZE
+#define TRB_SEGMENT_SHIFT	PAGE_SHIFT
+#define TRBS_PER_SEGMENT	(TRB_SEGMENT_SIZE/16)
 /* Allow two commands + a link TRB, along with any reserved command TRBs */
 #define MAX_RSVD_CMD_TRBS	(TRBS_PER_SEGMENT - 3)
-#define TRB_SEGMENT_SIZE	(TRBS_PER_SEGMENT*16)
-#define TRB_SEGMENT_SHIFT	(ilog2(TRB_SEGMENT_SIZE))
 /* TRB buffer pointers can't cross 64KB boundaries */
 #define TRB_MAX_BUFF_SHIFT		16
 #define TRB_MAX_BUFF_SIZE	(1 << TRB_MAX_BUFF_SHIFT)
@@ -1279,6 +1281,8 @@ struct xhci_segment {
 	/* private to HCD */
 	struct xhci_segment	*next;
 	dma_addr_t		dma;
+	struct device		*dev;
+	struct work_struct	work; /* for dma_free_coherent constraints */
 };
 
 struct xhci_td {
@@ -1504,7 +1508,6 @@ struct xhci_hcd {
 
 	/* DMA pools */
 	struct dma_pool	*device_pool;
-	struct dma_pool	*segment_pool;
 	struct dma_pool	*small_streams_pool;
 	struct dma_pool	*medium_streams_pool;
 
@@ -1701,7 +1704,7 @@ void xhci_slot_copy(struct xhci_hcd *xhci,
 int xhci_endpoint_init(struct xhci_hcd *xhci, struct xhci_virt_device *virt_dev,
 		struct usb_device *udev, struct usb_host_endpoint *ep,
 		gfp_t mem_flags);
-void xhci_ring_free(struct xhci_hcd *xhci, struct xhci_ring *ring);
+void xhci_ring_free(struct xhci_ring *ring);
 int xhci_ring_expansion(struct xhci_hcd *xhci, struct xhci_ring *ring,
 				unsigned int num_trbs, gfp_t flags);
 void xhci_free_or_cache_endpoint_ring(struct xhci_hcd *xhci,
