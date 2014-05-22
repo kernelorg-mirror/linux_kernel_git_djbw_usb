@@ -217,7 +217,7 @@ static int xhci_free_msi(struct xhci_hcd *xhci)
 static int xhci_setup_msi(struct xhci_hcd *xhci)
 {
 	int ret;
-	struct pci_dev  *pdev = to_pci_dev(xhci_to_hcd(xhci)->self.controller);
+	struct pci_dev  *pdev = to_pci_dev(xhci_to_dev(xhci));
 
 	ret = pci_enable_msi(pdev);
 	if (ret) {
@@ -243,7 +243,7 @@ static int xhci_setup_msi(struct xhci_hcd *xhci)
  */
 static void xhci_free_irq(struct xhci_hcd *xhci)
 {
-	struct pci_dev *pdev = to_pci_dev(xhci_to_hcd(xhci)->self.controller);
+	struct pci_dev *pdev = to_pci_dev(xhci_to_dev(xhci));
 	int ret;
 
 	/* return if using legacy interrupt */
@@ -362,7 +362,7 @@ static int xhci_try_enable_msi(struct usb_hcd *hcd)
 	if (xhci->quirks & XHCI_PLAT)
 		return 0;
 
-	pdev = to_pci_dev(xhci_to_hcd(xhci)->self.controller);
+	pdev = to_pci_dev(xhci_to_dev(xhci));
 	/*
 	 * Some Fresco Logic host controllers advertise MSI, but fail to
 	 * generate interrupts.  Don't even try to enable MSI.

@@ -1595,14 +1595,19 @@ static inline struct usb_hcd *xhci_to_hcd(struct xhci_hcd *xhci)
 	return xhci->main_hcd;
 }
 
+static inline struct device *xhci_to_dev(struct xhci_hcd *xhci)
+{
+	return xhci_to_hcd(xhci)->self.controller;
+}
+
 #define xhci_dbg(xhci, fmt, args...) \
-	dev_dbg(xhci_to_hcd(xhci)->self.controller , fmt , ## args)
+	dev_dbg(xhci_to_dev(xhci), fmt , ## args)
 #define xhci_err(xhci, fmt, args...) \
-	dev_err(xhci_to_hcd(xhci)->self.controller , fmt , ## args)
+	dev_err(xhci_to_dev(xhci), fmt , ## args)
 #define xhci_warn(xhci, fmt, args...) \
-	dev_warn(xhci_to_hcd(xhci)->self.controller , fmt , ## args)
+	dev_warn(xhci_to_dev(xhci), fmt , ## args)
 #define xhci_warn_ratelimited(xhci, fmt, args...) \
-	dev_warn_ratelimited(xhci_to_hcd(xhci)->self.controller , fmt , ## args)
+	dev_warn_ratelimited(xhci_to_dev(xhci), fmt , ## args)
 
 /*
  * Registers should always be accessed with double word or quad word accesses.

@@ -574,11 +574,10 @@ static void xhci_free_stream_ctx(struct xhci_hcd *xhci,
 		unsigned int num_stream_ctxs,
 		struct xhci_stream_ctx *stream_ctx, dma_addr_t dma)
 {
-	struct device *dev = xhci_to_hcd(xhci)->self.controller;
 	size_t size = sizeof(struct xhci_stream_ctx) * num_stream_ctxs;
 
 	if (size > MEDIUM_STREAM_ARRAY_SIZE)
-		dma_free_coherent(dev, size,
+		dma_free_coherent(xhci_to_dev(xhci), size,
 				stream_ctx, dma);
 	else if (size <= SMALL_STREAM_ARRAY_SIZE)
 		return dma_pool_free(xhci->small_streams_pool,
@@ -602,11 +601,10 @@ static struct xhci_stream_ctx *xhci_alloc_stream_ctx(struct xhci_hcd *xhci,
 		unsigned int num_stream_ctxs, dma_addr_t *dma,
 		gfp_t mem_flags)
 {
-	struct device *dev = xhci_to_hcd(xhci)->self.controller;
 	size_t size = sizeof(struct xhci_stream_ctx) * num_stream_ctxs;
 
 	if (size > MEDIUM_STREAM_ARRAY_SIZE)
-		return dma_alloc_coherent(dev, size,
+		return dma_alloc_coherent(xhci_to_dev(xhci), size,
 				dma, mem_flags);
 	else if (size <= SMALL_STREAM_ARRAY_SIZE)
 		return dma_pool_alloc(xhci->small_streams_pool,
@@ -1644,7 +1642,6 @@ void xhci_slot_copy(struct xhci_hcd *xhci,
 static int scratchpad_alloc(struct xhci_hcd *xhci, gfp_t flags)
 {
 	int i;
-	struct device *dev = xhci_to_hcd(xhci)->self.controller;
 	int num_sp = HCS_MAX_SCRATCHPAD(xhci->hcs_params2);
 
 	xhci_dbg_trace(xhci, trace_xhci_dbg_init,
@@ -1657,7 +1654,7 @@ static int scratchpad_alloc(struct xhci_hcd *xhci, gfp_t flags)
 	if (!xhci->scratchpad)
 		goto fail_sp;
 
-	xhci->scratchpad->sp_array = dma_alloc_coherent(dev,
+	xhci->scratchpad->sp_array = dma_alloc_coherent(xhci_to_dev(xhci),
 				     num_sp * sizeof(u64),
 				     &xhci->scratchpad->sp_dma, flags);
 	if (!xhci->scratchpad->sp_array)
@@ -1676,8 +1673,8 @@ static int scratchpad_alloc(struct xhci_hcd *xhci, gfp_t flags)
 	xhci->dcbaa->dev_context_ptrs[0] = cpu_to_le64(xhci->scratchpad->sp_dma);
 	for (i = 0; i < num_sp; i++) {
 		dma_addr_t dma;
-		void *buf = dma_alloc_coherent(dev, xhci->page_size, &dma,
-				flags);
+		void *buf = dma_alloc_coherent(xhci_to_dev(xhci),
+				xhci->page_size, &dma, flags);
 		if (!buf)
 			goto fail_sp5;
 
@@ -1690,7 +1687,7 @@ static int scratchpad_alloc(struct xhci_hcd *xhci, gfp_t flags)
 
  fail_sp5:
 	for (i = i - 1; i >= 0; i--) {
-		dma_free_coherent(dev, xhci->page_size,
+		dma_free_coherent(xhci_to_dev(xhci), xhci->page_size,
 				    xhci->scratchpad->sp_buffers[i],
 				    xhci->scratchpad->sp_dma_buffers[i]);
 	}
@@ -1700,7 +1697,7 @@ static int scratchpad_alloc(struct xhci_hcd *xhci, gfp_t flags)
 	kfree(xhci->scratchpad->sp_buffers);
 
  fail_sp3:
-	dma_free_coherent(dev, num_sp * sizeof(u64),
+	dma_free_coherent(xhci_to_dev(xhci), num_sp * sizeof(u64),
 			    xhci->scratchpad->sp_array,
 			    xhci->scratchpad->sp_dma);
 
@@ -1716,7 +1713,6 @@ static void scratchpad_free(struct xhci_hcd *xhci)
 {
 	int num_sp;
 	int i;
-	struct device *dev = xhci_to_hcd(xhci)->self.controller;
 
 	if (!xhci->scratchpad)
 		return;
@@ -1724,13 +1720,13 @@ static void scratchpad_free(struct xhci_hcd *xhci)
 	num_sp = HCS_MAX_SCRATCHPAD(xhci->hcs_params2);
 
 	for (i = 0; i < num_sp; i++) {
-		dma_free_coherent(dev, xhci->page_size,
+		dma_free_coherent(xhci_to_dev(xhci), xhci->page_size,
 				    xhci->scratchpad->sp_buffers[i],
 				    xhci->scratchpad->sp_dma_buffers[i]);
 	}
 	kfree(xhci->scratchpad->sp_dma_buffers);
 	kfree(xhci->scratchpad->sp_buffers);
-	dma_free_coherent(dev, num_sp * sizeof(u64),
+	dma_free_coherent(xhci_to_dev(xhci), num_sp * sizeof(u64),
 			    xhci->scratchpad->sp_array,
 			    xhci->scratchpad->sp_dma);
 	kfree(xhci->scratchpad);
@@ -1792,7 +1788,6 @@ void xhci_free_command(struct xhci_hcd *xhci,
 
 void xhci_mem_cleanup(struct xhci_hcd *xhci)
 {
-	struct device	*dev = xhci_to_hcd(xhci)->self.controller;
 	int size;
 	int i, j, num_ports;
 
@@ -1801,7 +1796,7 @@ void xhci_mem_cleanup(struct xhci_hcd *xhci)
 	/* Free the Event Ring Segment Table and the actual Event Ring */
 	size = sizeof(struct xhci_erst_entry)*(xhci->erst.num_entries);
 	if (xhci->erst.entries)
-		dma_free_coherent(dev, size,
+		dma_free_coherent(xhci_to_dev(xhci), size,
 				xhci->erst.entries, xhci->erst.erst_dma_addr);
 	xhci->erst.entries = NULL;
 	xhci_dbg_trace(xhci, trace_xhci_dbg_init, "Freed ERST");
@@ -1854,7 +1849,7 @@ void xhci_mem_cleanup(struct xhci_hcd *xhci)
 			"Freed medium stream array pool");
 
 	if (xhci->dcbaa)
-		dma_free_coherent(dev, sizeof(*xhci->dcbaa),
+		dma_free_coherent(xhci_to_dev(xhci), sizeof(*xhci->dcbaa),
 				xhci->dcbaa, xhci->dcbaa->dma);
 	xhci->dcbaa = NULL;
 
@@ -2312,7 +2307,7 @@ static int xhci_setup_port_arrays(struct xhci_hcd *xhci, gfp_t flags)
 int xhci_mem_init(struct xhci_hcd *xhci, gfp_t flags)
 {
 	dma_addr_t	dma;
-	struct device	*dev = xhci_to_hcd(xhci)->self.controller;
+	struct device	*dev = xhci_to_dev(xhci);
 	unsigned int	val, val2;
 	u64		val_64;
 	struct xhci_segment	*seg;
