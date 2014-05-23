@@ -237,9 +237,9 @@ static void inc_enq(struct xhci_hcd *xhci, struct xhci_ring *ring,
 			next->link.control ^= cpu_to_le32(TRB_CYCLE);
 
 			/* Toggle the cycle bit after the last ring segment. */
-			if (last_trb_on_last_seg(xhci, ring, ring->enq_seg, next)) {
-				ring->cycle_state = (ring->cycle_state ? 0 : 1);
-			}
+			if (last_trb_on_last_seg(xhci, ring, ring->enq_seg,
+						next))
+				ring->cycle_state ^= 1;
 		}
 		ring->enq_seg = ring->enq_seg->next;
 		ring->enqueue = ring->enq_seg->trbs;
@@ -2875,9 +2875,9 @@ static int prepare_ring(struct xhci_hcd *xhci, struct xhci_ring *ep_ring,
 			next->link.control ^= cpu_to_le32(TRB_CYCLE);
 
 			/* Toggle the cycle bit after the last ring segment. */
-			if (last_trb_on_last_seg(xhci, ring, ring->enq_seg, next)) {
-				ring->cycle_state = (ring->cycle_state ? 0 : 1);
-			}
+			if (last_trb_on_last_seg(xhci, ring, ring->enq_seg,
+						next))
+				ring->cycle_state ^= 1;
 			ring->enq_seg = ring->enq_seg->next;
 			ring->enqueue = ring->enq_seg->trbs;
 			next = ring->enqueue;
