@@ -115,11 +115,11 @@ static void xhci_link_segments(struct xhci_hcd *xhci, struct xhci_segment *prev,
 		return;
 	prev->next = next;
 	if (type != TYPE_EVENT) {
-		prev->trbs[TRBS_PER_SEGMENT-1].link.segment_ptr =
-			cpu_to_le64(next->dma);
+		prev->link = &prev->trbs[TRBS_PER_SEGMENT-1];
+		prev->link->link.segment_ptr = cpu_to_le64(next->dma);
 
 		/* Set the last TRB in the segment to have a TRB type ID of Link TRB */
-		val = le32_to_cpu(prev->trbs[TRBS_PER_SEGMENT-1].link.control);
+		val = le32_to_cpu(prev->link->link.control);
 		val &= ~TRB_TYPE_BITMASK;
 		val |= TRB_TYPE(TRB_LINK);
 		/* Always set the chain bit with 0.95 hardware */
@@ -128,7 +128,7 @@ static void xhci_link_segments(struct xhci_hcd *xhci, struct xhci_segment *prev,
 				(type == TYPE_ISOC &&
 				 (xhci->quirks & XHCI_AMD_0x96_HOST)))
 			val |= TRB_CHAIN;
-		prev->trbs[TRBS_PER_SEGMENT-1].link.control = cpu_to_le32(val);
+		prev->link->link.control = cpu_to_le32(val);
 	}
 }
 
@@ -152,10 +152,8 @@ static void xhci_link_rings(struct xhci_hcd *xhci, struct xhci_ring *ring,
 	ring->num_trbs_free += (TRBS_PER_SEGMENT - 1) * num_segs;
 
 	if (ring->type != TYPE_EVENT && ring->enq_seg == ring->last_seg) {
-		ring->last_seg->trbs[TRBS_PER_SEGMENT-1].link.control
-			&= ~cpu_to_le32(LINK_TOGGLE);
-		last->trbs[TRBS_PER_SEGMENT-1].link.control
-			|= cpu_to_le32(LINK_TOGGLE);
+		ring->last_seg->link->link.control &= ~cpu_to_le32(LINK_TOGGLE);
+		last->link->link.control |= cpu_to_le32(LINK_TOGGLE);
 		ring->last_seg = last;
 	}
 }
@@ -395,8 +393,7 @@ static struct xhci_ring *xhci_ring_alloc(struct xhci_hcd *xhci,
 	/* Only event ring does not use link TRB */
 	if (type != TYPE_EVENT) {
 		/* See section 4.9.2.1 and 6.4.4.1 */
-		ring->last_seg->trbs[TRBS_PER_SEGMENT - 1].link.control |=
-			cpu_to_le32(LINK_TOGGLE);
+		ring->last_seg->link->link.control |= cpu_to_le32(LINK_TOGGLE);
 	}
 	xhci_initialize_ring_info(ring, cycle_state);
 	return ring;

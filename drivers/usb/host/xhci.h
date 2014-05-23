@@ -1279,6 +1279,7 @@ union xhci_trb {
 struct xhci_segment {
 	union xhci_trb		*trbs;
 	/* private to HCD */
+	union xhci_trb		*link;
 	struct xhci_segment	*next;
 	dma_addr_t		dma;
 	struct device		*dev;

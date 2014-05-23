@@ -820,10 +820,14 @@ static void xhci_clear_command_ring(struct xhci_hcd *xhci)
 	ring = xhci->cmd_ring;
 	seg = ring->deq_seg;
 	do {
-		memset(seg->trbs, 0,
-			sizeof(union xhci_trb) * (TRBS_PER_SEGMENT - 1));
-		seg->trbs[TRBS_PER_SEGMENT - 1].link.control &=
-			cpu_to_le32(~TRB_CYCLE);
+		/* clear all but the link-trb */
+		memset(seg->trbs, 0, (seg->link - seg->trbs)
+		       * sizeof(union xhci_trb));
+		/* note: 0-length memset if the link is at the end */
+		memset(seg->link + 1, 0, (TRBS_PER_SEGMENT
+		       - (seg->link - seg->trbs) - 1)
+		       * sizeof(union xhci_trb));
+		seg->link->link.control &= cpu_to_le32(~TRB_CYCLE);
 		seg = seg->next;
 	} while (seg != ring->deq_seg);
 

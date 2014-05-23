@@ -374,12 +374,10 @@ static struct xhci_segment *find_trb_seg(
 		union xhci_trb	*trb, int *cycle_state)
 {
 	struct xhci_segment *cur_seg = start_seg;
-	struct xhci_generic_trb *generic_trb;
 
 	while (cur_seg->trbs > trb ||
 			&cur_seg->trbs[TRBS_PER_SEGMENT - 1] < trb) {
-		generic_trb = &cur_seg->trbs[TRBS_PER_SEGMENT - 1].generic;
-		if (generic_trb->field[3] & cpu_to_le32(LINK_TOGGLE))
+		if (cur_seg->link->link.control & cpu_to_le32(LINK_TOGGLE))
 			*cycle_state ^= 0x1;
 		cur_seg = cur_seg->next;
 		if (cur_seg == start_seg)
@@ -1735,8 +1733,7 @@ struct xhci_segment *trb_in_td(struct xhci_segment *start_seg,
 		if (start_dma == 0)
 			return NULL;
 		/* We may get an event for a Link TRB in the middle of a TD */
-		end_seg_dma = xhci_trb_virt_to_dma(cur_seg,
-				&cur_seg->trbs[TRBS_PER_SEGMENT - 1]);
+		end_seg_dma = xhci_trb_virt_to_dma(cur_seg, cur_seg->link);
 		/* If the end TRB isn't in this segment, this is set to 0 */
 		end_trb_dma = xhci_trb_virt_to_dma(cur_seg, end_trb);
 
