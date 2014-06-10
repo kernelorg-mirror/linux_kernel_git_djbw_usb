@@ -814,12 +814,10 @@ static void xhci_set_cmd_ring_deq(struct xhci_hcd *xhci)
  */
 static void xhci_clear_command_ring(struct xhci_hcd *xhci)
 {
-	struct xhci_ring *ring;
-	struct xhci_segment *seg;
+	struct xhci_ring *ring = xhci->cmd_ring;
+	struct xhci_segment *first_seg = xhci_ring_first_seg(ring), *seg;
 
-	ring = xhci->cmd_ring;
-	seg = ring->deq_seg;
-	do {
+	list_for_each_entry(seg, &ring->segments, list) {
 		/* clear all but the link-trb */
 		memset(seg->trbs, 0, (seg->link - seg->trbs)
 		       * sizeof(union xhci_trb));
@@ -828,12 +826,11 @@ static void xhci_clear_command_ring(struct xhci_hcd *xhci)
 		       - (seg->link - seg->trbs) - 1)
 		       * sizeof(union xhci_trb));
 		seg->link->link.control &= cpu_to_le32(~TRB_CYCLE);
-		seg = seg->next;
-	} while (seg != ring->deq_seg);
+	}
 
 	/* Reset the software enqueue and dequeue pointers */
-	ring->deq_seg = ring->first_seg;
-	ring->dequeue = ring->first_seg->trbs;
+	ring->deq_seg = first_seg;
+	ring->dequeue = first_seg->trbs;
 	ring->enq_seg = ring->deq_seg;
 	ring->enqueue = ring->dequeue;
 

@@ -24,6 +24,7 @@
 #define __LINUX_XHCI_HCD_H
 
 #include <linux/usb.h>
+#include <linux/list.h>
 #include <linux/timer.h>
 #include <linux/kernel.h>
 #include <linux/usb/hcd.h>
@@ -1280,7 +1281,7 @@ struct xhci_segment {
 	union xhci_trb		*trbs;
 	/* private to HCD */
 	union xhci_trb		*link;
-	struct xhci_segment	*next;
+	struct list_head	list;
 	dma_addr_t		dma;
 	struct device		*dev;
 	struct work_struct	work; /* for dma_free_coherent constraints */
@@ -1321,8 +1322,7 @@ enum xhci_ring_type {
 };
 
 struct xhci_ring {
-	struct xhci_segment	*first_seg;
-	struct xhci_segment	*last_seg;
+	struct list_head	segments;
 	union  xhci_trb		*enqueue;
 	struct xhci_segment	*enq_seg;
 	unsigned int		enq_updates;
@@ -1344,6 +1344,25 @@ struct xhci_ring {
 	bool			last_td_was_short;
 	struct radix_tree_root	*trb_address_map;
 };
+
+static inline struct xhci_segment *xhci_ring_first_seg(struct xhci_ring *ring)
+{
+	return list_first_entry(&ring->segments, struct xhci_segment, list);
+}
+
+static inline struct xhci_segment *xhci_ring_last_seg(struct xhci_ring *ring)
+{
+	return list_last_entry(&ring->segments, struct xhci_segment, list);
+}
+
+static inline struct xhci_segment *xhci_segment_next(struct xhci_ring *ring,
+		struct xhci_segment *seg)
+{
+	if (seg == xhci_ring_last_seg(ring))
+		return xhci_ring_first_seg(ring);
+	else
+		return list_next_entry(seg, list);
+}
 
 struct xhci_erst_entry {
 	/* 64-bit event ring segment address */
@@ -1811,9 +1830,9 @@ void xhci_reset_bandwidth(struct usb_hcd *hcd, struct usb_device *udev);
 
 /* xHCI ring, segment, TRB, and TD functions */
 dma_addr_t xhci_trb_virt_to_dma(struct xhci_segment *seg, union xhci_trb *trb);
-struct xhci_segment *trb_in_td(struct xhci_segment *start_seg,
-		union xhci_trb *start_trb, union xhci_trb *end_trb,
-		dma_addr_t suspect_dma);
+struct xhci_segment *trb_in_td(struct xhci_ring *ring,
+		struct xhci_segment *start_seg, union xhci_trb *start_trb,
+		union xhci_trb *end_trb, dma_addr_t suspect_dma);
 int xhci_is_vendor_info_code(struct xhci_hcd *xhci, unsigned int trb_comp_code);
 void xhci_ring_cmd_db(struct xhci_hcd *xhci);
 int xhci_queue_slot_control(struct xhci_hcd *xhci, struct xhci_command *cmd,

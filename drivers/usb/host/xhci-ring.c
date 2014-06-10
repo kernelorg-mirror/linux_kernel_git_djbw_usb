@@ -95,7 +95,7 @@ static bool last_trb_on_last_seg(struct xhci_ring *ring,
 {
 	if (ring->type == TYPE_EVENT)
 		return (trb == &seg->trbs[TRBS_PER_SEGMENT]) &&
-			(seg->next == ring->first_seg);
+			(seg == xhci_ring_last_seg(ring));
 	else
 		return le32_to_cpu(trb->link.control) & LINK_TOGGLE;
 }
@@ -127,7 +127,7 @@ static void next_trb(struct xhci_ring *ring, struct xhci_segment **seg,
 		union xhci_trb **trb)
 {
 	if (last_trb(ring, *seg, *trb)) {
-		*seg = (*seg)->next;
+		*seg = xhci_segment_next(ring, *seg);
 		*trb = ((*seg)->trbs);
 	} else {
 		(*trb)++;
@@ -162,7 +162,7 @@ static void inc_deq(struct xhci_ring *ring)
 						ring->deq_seg, ring->dequeue)) {
 				ring->cycle_state ^= 1;
 			}
-			ring->deq_seg = ring->deq_seg->next;
+			ring->deq_seg = xhci_segment_next(ring, ring->deq_seg);
 			ring->dequeue = ring->deq_seg->trbs;
 		} else {
 			ring->dequeue++;
@@ -238,7 +238,7 @@ static void inc_enq(struct xhci_hcd *xhci, struct xhci_ring *ring,
 			if (last_trb_on_last_seg(ring, ring->enq_seg, next))
 				ring->cycle_state ^= 1;
 		}
-		ring->enq_seg = ring->enq_seg->next;
+		ring->enq_seg = xhci_segment_next(ring, ring->enq_seg);
 		ring->enqueue = ring->enq_seg->trbs;
 		next = ring->enqueue;
 	}
@@ -366,7 +366,7 @@ static void ring_doorbell_for_active_rings(struct xhci_hcd *xhci,
  * If we must move past a segment that has a link TRB with a toggle cycle state
  * bit set, then we will toggle the value pointed at by cycle_state.
  */
-static struct xhci_segment *find_trb_seg(
+static struct xhci_segment *find_trb_seg(struct xhci_ring *ring,
 		struct xhci_segment *start_seg,
 		union xhci_trb	*trb, int *cycle_state)
 {
@@ -376,7 +376,7 @@ static struct xhci_segment *find_trb_seg(
 			&cur_seg->trbs[TRBS_PER_SEGMENT - 1] < trb) {
 		if (cur_seg->link->link.control & cpu_to_le32(LINK_TOGGLE))
 			*cycle_state ^= 0x1;
-		cur_seg = cur_seg->next;
+		cur_seg = xhci_segment_next(ring, cur_seg);
 		if (cur_seg == start_seg)
 			/* Looped over the entire list.  Oops! */
 			return NULL;
@@ -453,8 +453,8 @@ void xhci_find_new_dequeue_state(struct xhci_hcd *xhci,
 {
 	struct xhci_virt_device *dev = xhci->devs[slot_id];
 	struct xhci_virt_ep *ep = &dev->eps[ep_index];
-	struct xhci_ring *ep_ring;
 	struct xhci_generic_trb *trb;
+	struct xhci_ring *ep_ring;
 	dma_addr_t addr;
 	u64 hw_dequeue;
 
@@ -500,14 +500,14 @@ void xhci_find_new_dequeue_state(struct xhci_hcd *xhci,
 	 * wraps around, so add one more toggle manually in that case.
 	 */
 	state->new_cycle_state = hw_dequeue & 0x1;
-	if (ep_ring->first_seg == ep_ring->first_seg->next &&
+	if (list_is_singular(&ep_ring->segments) &&
 			cur_td->last_trb < state->new_deq_ptr)
 		state->new_cycle_state ^= 0x1;
 
 	state->new_deq_ptr = cur_td->last_trb;
 	xhci_dbg_trace(xhci, trace_xhci_dbg_cancel_urb,
 			"Finding segment containing last TRB in TD.");
-	state->new_deq_seg = find_trb_seg(state->new_deq_seg,
+	state->new_deq_seg = find_trb_seg(ep_ring, state->new_deq_seg,
 			state->new_deq_ptr, &state->new_cycle_state);
 	if (!state->new_deq_seg) {
 		WARN_ON(1);
@@ -965,7 +965,7 @@ static void update_ring_for_set_deq_completion(struct xhci_hcd *xhci,
 	 * the segment into la-la-land.
 	 */
 	if (last_trb(ep_ring, ep_ring->deq_seg, ep_ring->dequeue)) {
-		ep_ring->deq_seg = ep_ring->deq_seg->next;
+		ep_ring->deq_seg = xhci_segment_next(ep_ring, ep_ring->deq_seg);
 		ep_ring->dequeue = ep_ring->deq_seg->trbs;
 	}
 
@@ -978,7 +978,8 @@ static void update_ring_for_set_deq_completion(struct xhci_hcd *xhci,
 			if (ep_ring->dequeue ==
 					dev->eps[ep_index].queued_deq_ptr)
 				break;
-			ep_ring->deq_seg = ep_ring->deq_seg->next;
+			ep_ring->deq_seg = xhci_segment_next(ep_ring,
+					ep_ring->deq_seg);
 			ep_ring->dequeue = ep_ring->deq_seg->trbs;
 		}
 		if (ep_ring->dequeue == dequeue_temp) {
@@ -1713,7 +1714,8 @@ cleanup:
  * TRB in this TD, this function returns that TRB's segment.  Otherwise it
  * returns 0.
  */
-struct xhci_segment *trb_in_td(struct xhci_segment *start_seg,
+struct xhci_segment *trb_in_td(struct xhci_ring *ring,
+		struct xhci_segment *start_seg,
 		union xhci_trb	*start_trb,
 		union xhci_trb	*end_trb,
 		dma_addr_t	suspect_dma)
@@ -1755,7 +1757,7 @@ struct xhci_segment *trb_in_td(struct xhci_segment *start_seg,
 			if (suspect_dma >= start_dma && suspect_dma <= end_seg_dma)
 				return cur_seg;
 		}
-		cur_seg = cur_seg->next;
+		cur_seg = xhci_segment_next(ring, cur_seg);
 		start_dma = xhci_trb_virt_to_dma(cur_seg, &cur_seg->trbs[0]);
 	} while (cur_seg != start_seg);
 
@@ -2466,8 +2468,8 @@ static int handle_tx_event(struct xhci_hcd *xhci,
 			td_num--;
 
 		/* Is this a TRB in the currently executing TD? */
-		event_seg = trb_in_td(ep_ring->deq_seg, ep_ring->dequeue,
-				td->last_trb, event_dma);
+		event_seg = trb_in_td(ep_ring, ep_ring->deq_seg,
+				ep_ring->dequeue, td->last_trb, event_dma);
 
 		/*
 		 * Skip the Force Stopped Event. The event_trb(event_dma) of FSE
@@ -2870,7 +2872,7 @@ static int prepare_ring(struct xhci_hcd *xhci, struct xhci_ring *ep_ring,
 			/* Toggle the cycle bit after the last ring segment. */
 			if (last_trb_on_last_seg(ring, ring->enq_seg, next))
 				ring->cycle_state ^= 1;
-			ring->enq_seg = ring->enq_seg->next;
+			ring->enq_seg = xhci_segment_next(ring, ring->enq_seg);
 			ring->enqueue = ring->enq_seg->trbs;
 			next = ring->enqueue;
 		}

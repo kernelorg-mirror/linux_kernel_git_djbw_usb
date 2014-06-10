@@ -355,14 +355,15 @@ void xhci_debug_ring(struct xhci_hcd *xhci, struct xhci_ring *ring)
 {
 	/* FIXME: Throw an error if any segment doesn't have a Link TRB */
 	struct xhci_segment *seg;
-	struct xhci_segment *first_seg = ring->first_seg;
-	xhci_debug_segment(xhci, first_seg);
+
+	seg = xhci_ring_first_seg(ring);
+	xhci_debug_segment(xhci, seg);
 
 	if (!ring->enq_updates && !ring->deq_updates) {
 		xhci_dbg(xhci, "  Ring has not been updated\n");
 		return;
 	}
-	for (seg = first_seg->next; seg != first_seg; seg = seg->next)
+	list_for_each_entry_continue(seg, &ring->segments, list)
 		xhci_debug_segment(xhci, seg);
 }
 

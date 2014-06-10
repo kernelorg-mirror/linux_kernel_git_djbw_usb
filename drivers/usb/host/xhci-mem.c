@@ -60,7 +60,7 @@ static struct xhci_segment *xhci_segment_alloc(struct xhci_hcd *xhci,
 		for (i = 0; i < TRBS_PER_SEGMENT; i++)
 			seg->trbs[i].link.control |= cpu_to_le32(TRB_CYCLE);
 	}
-	seg->next = NULL;
+	INIT_LIST_HEAD(&seg->list);
 
 	return seg;
 }
@@ -85,23 +85,17 @@ static void xhci_segment_free(struct xhci_segment *seg)
 	schedule_work(&seg->work);
 }
 
-static void xhci_free_segments_for_ring(struct xhci_segment *first)
+static void xhci_free_segments(struct list_head *segments)
 {
-	struct xhci_segment *seg;
+	struct xhci_segment *seg, *s;
 
-	seg = first->next;
-	while (seg != first) {
-		struct xhci_segment *next = seg->next;
-
+	list_for_each_entry_safe(seg, s, segments, list) {
+		list_del_init(&seg->list);
 		xhci_segment_free(seg);
-		seg = next;
 	}
-	xhci_segment_free(first);
 }
 
 /*
- * Make the prev segment point to the next segment.
- *
  * Change the last TRB in the prev segment to be a Link TRB which points to the
  * DMA address of the next segment.  The caller needs to set any Link TRB
  * related flags, such as End TRB, Toggle Cycle, and no snoop.
@@ -113,7 +107,6 @@ static void xhci_link_segments(struct xhci_hcd *xhci, struct xhci_segment *prev,
 
 	if (!prev || !next)
 		return;
-	prev->next = next;
 	if (type != TYPE_EVENT) {
 		prev->link = &prev->trbs[TRBS_PER_SEGMENT-1];
 		prev->link->link.segment_ptr = cpu_to_le64(next->dma);
@@ -137,24 +130,29 @@ static void xhci_link_segments(struct xhci_hcd *xhci, struct xhci_segment *prev,
  * Set Toggle Cycle for the new ring if needed.
  */
 static void xhci_link_rings(struct xhci_hcd *xhci, struct xhci_ring *ring,
-		struct xhci_segment *first, struct xhci_segment *last,
-		unsigned int num_segs)
+		struct list_head *segments, unsigned int num_segs)
 {
-	struct xhci_segment *next;
+	struct xhci_segment *insert_head, *insert_next, *new_head, *new_tail;
+	struct xhci_segment *last_seg = xhci_ring_last_seg(ring);
 
-	if (!ring || !first || !last)
-		return;
+	new_tail = list_last_entry(segments, typeof(*new_tail), list);
+	new_head = list_first_entry(segments, typeof(*new_head), list);
+	insert_head = ring->enq_seg;
+	insert_next = xhci_segment_next(ring, insert_head);
 
-	next = ring->enq_seg->next;
-	xhci_link_segments(xhci, ring->enq_seg, first, ring->type);
-	xhci_link_segments(xhci, last, next, ring->type);
+	/* link them physically */
+	xhci_link_segments(xhci, insert_head, new_head, ring->type);
+	xhci_link_segments(xhci, new_tail, insert_next, ring->type);
+
+	/* link them logically */
+	list_splice_init(segments, &insert_head->list);
+
 	ring->num_segs += num_segs;
 	ring->num_trbs_free += (TRBS_PER_SEGMENT - 1) * num_segs;
 
-	if (ring->type != TYPE_EVENT && ring->enq_seg == ring->last_seg) {
-		ring->last_seg->link->link.control &= ~cpu_to_le32(LINK_TOGGLE);
-		last->link->link.control |= cpu_to_le32(LINK_TOGGLE);
-		ring->last_seg = last;
+	if (ring->type != TYPE_EVENT && insert_head == last_seg) {
+		last_seg->link->link.control &= ~cpu_to_le32(LINK_TOGGLE);
+		new_tail->link->link.control |= cpu_to_le32(LINK_TOGGLE);
 	}
 }
 
@@ -224,39 +222,32 @@ static void xhci_remove_segment_mapping(struct radix_tree_root *trb_address_map,
 static int xhci_update_stream_segment_mapping(
 		struct radix_tree_root *trb_address_map,
 		struct xhci_ring *ring,
-		struct xhci_segment *first_seg,
-		struct xhci_segment *last_seg,
+		struct list_head *segments,
 		gfp_t mem_flags)
 {
-	struct xhci_segment *seg;
-	struct xhci_segment *failed_seg;
+	struct xhci_segment *seg, *failed_seg;
 	int ret;
 
 	if (WARN_ON_ONCE(trb_address_map == NULL))
 		return 0;
 
-	seg = first_seg;
-	do {
+	list_for_each_entry(seg, segments, list) {
 		ret = xhci_insert_segment_mapping(trb_address_map,
 				ring, seg, mem_flags);
-		if (ret)
+		if (ret) {
+			failed_seg = seg;
 			goto remove_streams;
-		if (seg == last_seg)
-			return 0;
-		seg = seg->next;
-	} while (seg != first_seg);
+		}
+	}
 
 	return 0;
 
 remove_streams:
-	failed_seg = seg;
-	seg = first_seg;
-	do {
-		xhci_remove_segment_mapping(trb_address_map, seg);
+	list_for_each_entry(seg, segments, list) {
 		if (seg == failed_seg)
-			return ret;
-		seg = seg->next;
-	} while (seg != first_seg);
+			break;
+		xhci_remove_segment_mapping(trb_address_map, seg);
+	}
 
 	return ret;
 }
@@ -268,17 +259,14 @@ static void xhci_remove_stream_mapping(struct xhci_ring *ring)
 	if (WARN_ON_ONCE(ring->trb_address_map == NULL))
 		return;
 
-	seg = ring->first_seg;
-	do {
+	list_for_each_entry(seg, &ring->segments, list)
 		xhci_remove_segment_mapping(ring->trb_address_map, seg);
-		seg = seg->next;
-	} while (seg != ring->first_seg);
 }
 
 static int xhci_update_stream_mapping(struct xhci_ring *ring, gfp_t mem_flags)
 {
 	return xhci_update_stream_segment_mapping(ring->trb_address_map, ring,
-			ring->first_seg, ring->last_seg, mem_flags);
+			&ring->segments, mem_flags);
 }
 
 /* XXX: Do we need the hcd structure in all these functions? */
@@ -287,10 +275,10 @@ void xhci_ring_free(struct xhci_ring *ring)
 	if (!ring)
 		return;
 
-	if (ring->first_seg) {
+	if (!list_empty(&ring->segments)) {
 		if (ring->type == TYPE_STREAM)
 			xhci_remove_stream_mapping(ring);
-		xhci_free_segments_for_ring(ring->first_seg);
+		xhci_free_segments(&ring->segments);
 	}
 
 	kfree(ring);
@@ -299,11 +287,13 @@ void xhci_ring_free(struct xhci_ring *ring)
 static void xhci_initialize_ring_info(struct xhci_ring *ring,
 					unsigned int cycle_state)
 {
+	struct xhci_segment *first_seg = xhci_ring_first_seg(ring);
+
 	/* The ring is empty, so the enqueue pointer == dequeue pointer */
-	ring->enqueue = ring->first_seg->trbs;
-	ring->enq_seg = ring->first_seg;
+	ring->enqueue = first_seg->trbs;
+	ring->enq_seg = first_seg;
 	ring->dequeue = ring->enqueue;
-	ring->deq_seg = ring->first_seg;
+	ring->deq_seg = first_seg;
 	/* The ring is initialized to 0. The producer must write 1 to the cycle
 	 * bit to handover ownership of the TRB, so PCS = 1.  The consumer must
 	 * compare CCS to the cycle bit to check ownership, so CCS = 1.
@@ -325,38 +315,31 @@ static void xhci_initialize_ring_info(struct xhci_ring *ring,
 
 /* Allocate segments and link them for a ring */
 static int xhci_alloc_segments_for_ring(struct xhci_hcd *xhci,
-		struct xhci_segment **first, struct xhci_segment **last,
-		unsigned int num_segs, unsigned int cycle_state,
-		enum xhci_ring_type type, gfp_t flags)
+		struct list_head *segments, unsigned int num_segs,
+		unsigned int cycle_state, enum xhci_ring_type type, gfp_t flags)
 {
-	struct xhci_segment *prev;
+	struct xhci_segment *seg;
+	int i;
 
-	prev = xhci_segment_alloc(xhci, cycle_state, flags);
-	if (!prev)
-		return -ENOMEM;
-	num_segs--;
-
-	*first = prev;
-	while (num_segs > 0) {
-		struct xhci_segment	*next;
-
-		next = xhci_segment_alloc(xhci, cycle_state, flags);
-		if (!next) {
-			prev = *first;
-			while (prev) {
-				next = prev->next;
-				xhci_segment_free(prev);
-				prev = next;
-			}
-			return -ENOMEM;
-		}
-		xhci_link_segments(xhci, prev, next, type);
-
-		prev = next;
-		num_segs--;
+	for (i = 0; i < num_segs; i++) {
+		seg = xhci_segment_alloc(xhci, cycle_state, flags);
+		if (!seg)
+			break;
+		list_add_tail(&seg->list, segments);
 	}
-	xhci_link_segments(xhci, prev, *first, type);
-	*last = prev;
+
+	if (i < num_segs) {
+		xhci_free_segments(segments);
+		return -ENOMEM;
+	}
+
+	list_for_each_entry(seg, segments, list) {
+		struct xhci_segment *next = list_next_entry(seg, list);
+
+		if (&next->list == segments)
+			next = list_first_entry(segments, typeof(*next), list);
+		xhci_link_segments(xhci, seg, next, type);
+	}
 
 	return 0;
 }
@@ -372,7 +355,7 @@ static struct xhci_ring *xhci_ring_alloc(struct xhci_hcd *xhci,
 		unsigned int num_segs, unsigned int cycle_state,
 		enum xhci_ring_type type, gfp_t flags)
 {
-	struct xhci_ring	*ring;
+	struct xhci_ring *ring;
 	int ret;
 
 	ring = kzalloc(sizeof *(ring), flags);
@@ -380,20 +363,23 @@ static struct xhci_ring *xhci_ring_alloc(struct xhci_hcd *xhci,
 		return NULL;
 
 	ring->num_segs = num_segs;
+	INIT_LIST_HEAD(&ring->segments);
 	INIT_LIST_HEAD(&ring->td_list);
 	ring->type = type;
 	if (num_segs == 0)
 		return ring;
 
-	ret = xhci_alloc_segments_for_ring(xhci, &ring->first_seg,
-			&ring->last_seg, num_segs, cycle_state, type, flags);
+	ret = xhci_alloc_segments_for_ring(xhci, &ring->segments, num_segs,
+			cycle_state, type, flags);
 	if (ret)
 		goto fail;
 
 	/* Only event ring does not use link TRB */
 	if (type != TYPE_EVENT) {
+		struct xhci_segment *last_seg = xhci_ring_last_seg(ring);
+
 		/* See section 4.9.2.1 and 6.4.4.1 */
-		ring->last_seg->link->link.control |= cpu_to_le32(LINK_TOGGLE);
+		last_seg->link->link.control |= cpu_to_le32(LINK_TOGGLE);
 	}
 	xhci_initialize_ring_info(ring, cycle_state);
 	return ring;
@@ -434,10 +420,12 @@ static void xhci_reinit_cached_ring(struct xhci_hcd *xhci,
 			struct xhci_ring *ring, unsigned int cycle_state,
 			enum xhci_ring_type type)
 {
-	struct xhci_segment	*seg = ring->first_seg;
-	int i;
+	struct xhci_segment *seg;
 
-	do {
+	list_for_each_entry(seg, &ring->segments, list) {
+		struct xhci_segment *next = xhci_segment_next(ring, seg);
+		int i;
+
 		memset(seg->trbs, 0,
 				sizeof(union xhci_trb)*TRBS_PER_SEGMENT);
 		if (cycle_state == 0) {
@@ -446,9 +434,8 @@ static void xhci_reinit_cached_ring(struct xhci_hcd *xhci,
 					cpu_to_le32(TRB_CYCLE);
 		}
 		/* All endpoint rings have link TRBs */
-		xhci_link_segments(xhci, seg, seg->next, type);
-		seg = seg->next;
-	} while (seg != ring->first_seg);
+		xhci_link_segments(xhci, seg, next, type);
+	}
 	ring->type = type;
 	xhci_initialize_ring_info(ring, cycle_state);
 	/* td list should be empty since all URBs have been cancelled,
@@ -465,11 +452,10 @@ static void xhci_reinit_cached_ring(struct xhci_hcd *xhci,
 int xhci_ring_expansion(struct xhci_hcd *xhci, struct xhci_ring *ring,
 				unsigned int num_trbs, gfp_t flags)
 {
-	struct xhci_segment	*first;
-	struct xhci_segment	*last;
 	unsigned int		num_segs;
 	unsigned int		num_segs_needed;
 	int			ret;
+	LIST_HEAD(segments);
 
 	num_segs_needed = (num_trbs + (TRBS_PER_SEGMENT - 1) - 1) /
 				(TRBS_PER_SEGMENT - 1);
@@ -478,27 +464,20 @@ int xhci_ring_expansion(struct xhci_hcd *xhci, struct xhci_ring *ring,
 	num_segs = ring->num_segs > num_segs_needed ?
 			ring->num_segs : num_segs_needed;
 
-	ret = xhci_alloc_segments_for_ring(xhci, &first, &last,
+	ret = xhci_alloc_segments_for_ring(xhci, &segments,
 			num_segs, ring->cycle_state, ring->type, flags);
 	if (ret)
 		return -ENOMEM;
 
 	if (ring->type == TYPE_STREAM)
 		ret = xhci_update_stream_segment_mapping(ring->trb_address_map,
-						ring, first, last, flags);
+						ring, &segments, flags);
 	if (ret) {
-		struct xhci_segment *next;
-		do {
-			next = first->next;
-			xhci_segment_free(first);
-			if (first == last)
-				break;
-			first = next;
-		} while (true);
+		xhci_free_segments(&segments);
 		return ret;
 	}
 
-	xhci_link_rings(xhci, ring, first, last, num_segs);
+	xhci_link_rings(xhci, ring, &segments, num_segs);
 	xhci_dbg_trace(xhci, trace_xhci_dbg_ring_expansion,
 			"ring expansion succeed, now has %d segments",
 			ring->num_segs);
@@ -713,6 +692,8 @@ struct xhci_stream_info *xhci_alloc_stream_info(struct xhci_hcd *xhci,
 	 * Stream 0 is reserved.
 	 */
 	for (cur_stream = 1; cur_stream < num_streams; cur_stream++) {
+		struct xhci_segment *first_seg;
+
 		stream_info->stream_rings[cur_stream] =
 			xhci_ring_alloc(xhci, 2, 1, TYPE_STREAM, mem_flags);
 		cur_ring = stream_info->stream_rings[cur_stream];
@@ -721,7 +702,8 @@ struct xhci_stream_info *xhci_alloc_stream_info(struct xhci_hcd *xhci,
 		cur_ring->stream_id = cur_stream;
 		cur_ring->trb_address_map = &stream_info->trb_address_map;
 		/* Set deq ptr, cycle bit, and stream context type */
-		addr = cur_ring->first_seg->dma |
+		first_seg = xhci_ring_first_seg(cur_ring);
+		addr = first_seg->dma |
 			SCT_FOR_CTX(SCT_PRI_TR) |
 			cur_ring->cycle_state;
 		stream_info->stream_ctx_array[cur_stream].stream_ring =
@@ -1095,6 +1077,7 @@ static u32 xhci_find_real_port_number(struct xhci_hcd *xhci,
 /* Setup an xHCI virtual device for a Set Address command */
 int xhci_setup_addressable_virt_dev(struct xhci_hcd *xhci, struct usb_device *udev)
 {
+	struct xhci_segment	*first_seg;
 	struct xhci_virt_device *dev;
 	struct xhci_ep_ctx	*ep0_ctx;
 	struct xhci_slot_ctx    *slot_ctx;
@@ -1202,7 +1185,8 @@ int xhci_setup_addressable_virt_dev(struct xhci_hcd *xhci, struct usb_device *ud
 	ep0_ctx->ep_info2 |= cpu_to_le32(MAX_BURST(0) | ERROR_COUNT(3) |
 					 max_packets);
 
-	ep0_ctx->deq = cpu_to_le64(dev->eps[0].ring->first_seg->dma |
+	first_seg = xhci_ring_first_seg(dev->eps[0].ring);
+	ep0_ctx->deq = cpu_to_le64(first_seg->dma |
 				   dev->eps[0].ring->cycle_state);
 
 	/* Steps 7 and 8 were done in xhci_alloc_virt_device() */
@@ -1412,6 +1396,7 @@ int xhci_endpoint_init(struct xhci_hcd *xhci,
 		struct usb_host_endpoint *ep,
 		gfp_t mem_flags)
 {
+	struct xhci_segment *first_seg;
 	unsigned int ep_index;
 	struct xhci_ep_ctx *ep_ctx;
 	struct xhci_ring *ep_ring;
@@ -1446,7 +1431,8 @@ int xhci_endpoint_init(struct xhci_hcd *xhci,
 	}
 	virt_dev->eps[ep_index].skip = false;
 	ep_ring = virt_dev->eps[ep_index].new_ring;
-	ep_ctx->deq = cpu_to_le64(ep_ring->first_seg->dma | ep_ring->cycle_state);
+	first_seg = xhci_ring_first_seg(ep_ring);
+	ep_ctx->deq = cpu_to_le64(first_seg->dma | ep_ring->cycle_state);
 
 	ep_ctx->ep_info = cpu_to_le32(xhci_get_endpoint_interval(udev, ep)
 				      | EP_MULT(xhci_get_endpoint_mult(udev, ep)));
@@ -1887,6 +1873,7 @@ no_bw:
 }
 
 static int xhci_test_trb_in_td(struct xhci_hcd *xhci,
+		struct xhci_ring *input_ring,
 		struct xhci_segment *input_seg,
 		union xhci_trb *start_trb,
 		union xhci_trb *end_trb,
@@ -1901,7 +1888,7 @@ static int xhci_test_trb_in_td(struct xhci_hcd *xhci,
 	start_dma = xhci_trb_virt_to_dma(input_seg, start_trb);
 	end_dma = xhci_trb_virt_to_dma(input_seg, end_trb);
 
-	seg = trb_in_td(input_seg, start_trb, end_trb, input_dma);
+	seg = trb_in_td(input_ring, input_seg, start_trb, end_trb, input_dma);
 	if (seg != result_seg) {
 		xhci_warn(xhci, "WARN: %s TRB math test %d failed!\n",
 				test_name, test_number);
@@ -1923,6 +1910,8 @@ static int xhci_test_trb_in_td(struct xhci_hcd *xhci,
 /* TRB math checks for xhci_trb_in_td(), using the command and event rings. */
 static int xhci_check_trb_in_td_math(struct xhci_hcd *xhci, gfp_t mem_flags)
 {
+	struct xhci_segment *first_seg = xhci_ring_first_seg(xhci->event_ring);
+	struct xhci_segment *cmd_seg = xhci_ring_first_seg(xhci->cmd_ring);
 	struct {
 		dma_addr_t		input_dma;
 		struct xhci_segment	*result_seg;
@@ -1930,82 +1919,90 @@ static int xhci_check_trb_in_td_math(struct xhci_hcd *xhci, gfp_t mem_flags)
 		/* A zeroed DMA field should fail */
 		{ 0, NULL },
 		/* One TRB before the ring start should fail */
-		{ xhci->event_ring->first_seg->dma - 16, NULL },
+		{ first_seg->dma - 16, NULL },
 		/* One byte before the ring start should fail */
-		{ xhci->event_ring->first_seg->dma - 1, NULL },
+		{ first_seg->dma - 1, NULL },
 		/* Starting TRB should succeed */
-		{ xhci->event_ring->first_seg->dma, xhci->event_ring->first_seg },
+		{ first_seg->dma, first_seg },
 		/* Ending TRB should succeed */
-		{ xhci->event_ring->first_seg->dma + (TRBS_PER_SEGMENT - 1)*16,
-			xhci->event_ring->first_seg },
+		{ first_seg->dma + (TRBS_PER_SEGMENT - 1)*16, first_seg },
 		/* One byte after the ring end should fail */
-		{ xhci->event_ring->first_seg->dma + (TRBS_PER_SEGMENT - 1)*16 + 1, NULL },
+		{ first_seg->dma + (TRBS_PER_SEGMENT - 1)*16 + 1, NULL },
 		/* One TRB after the ring end should fail */
-		{ xhci->event_ring->first_seg->dma + (TRBS_PER_SEGMENT)*16, NULL },
+		{ first_seg->dma + (TRBS_PER_SEGMENT)*16, NULL },
 		/* An address of all ones should fail */
 		{ (dma_addr_t) (~0), NULL },
 	};
 	struct {
+		struct xhci_ring	*input_ring;
 		struct xhci_segment	*input_seg;
 		union xhci_trb		*start_trb;
 		union xhci_trb		*end_trb;
 		dma_addr_t		input_dma;
 		struct xhci_segment	*result_seg;
 	} complex_test_vector [] = {
-		/* Test feeding a valid DMA address from a different ring */
-		{	.input_seg = xhci->event_ring->first_seg,
-			.start_trb = xhci->event_ring->first_seg->trbs,
-			.end_trb = &xhci->event_ring->first_seg->trbs[TRBS_PER_SEGMENT - 1],
-			.input_dma = xhci->cmd_ring->first_seg->dma,
+		/* Test feeding a valid DMA address from a different ring */ {
+			.input_ring = xhci->event_ring,
+			.input_seg = first_seg,
+			.start_trb = first_seg->trbs,
+			.end_trb = &first_seg->trbs[TRBS_PER_SEGMENT - 1],
+			.input_dma = cmd_seg->dma,
 			.result_seg = NULL,
 		},
-		/* Test feeding a valid end TRB from a different ring */
-		{	.input_seg = xhci->event_ring->first_seg,
-			.start_trb = xhci->event_ring->first_seg->trbs,
-			.end_trb = &xhci->cmd_ring->first_seg->trbs[TRBS_PER_SEGMENT - 1],
-			.input_dma = xhci->cmd_ring->first_seg->dma,
+		/* Test feeding a valid end TRB from a different ring */ {
+			.input_ring = xhci->event_ring,
+			.input_seg = first_seg,
+			.start_trb = first_seg->trbs,
+			.end_trb = &cmd_seg->trbs[TRBS_PER_SEGMENT - 1],
+			.input_dma = cmd_seg->dma,
 			.result_seg = NULL,
 		},
-		/* Test feeding a valid start and end TRB from a different ring */
-		{	.input_seg = xhci->event_ring->first_seg,
-			.start_trb = xhci->cmd_ring->first_seg->trbs,
-			.end_trb = &xhci->cmd_ring->first_seg->trbs[TRBS_PER_SEGMENT - 1],
-			.input_dma = xhci->cmd_ring->first_seg->dma,
+		/* Test a valid start and end TRB from a different ring */ {
+			.input_ring = xhci->event_ring,
+			.input_seg = first_seg,
+			.start_trb = cmd_seg->trbs,
+			.end_trb = &cmd_seg->trbs[TRBS_PER_SEGMENT - 1],
+			.input_dma = cmd_seg->dma,
 			.result_seg = NULL,
 		},
-		/* TRB in this ring, but after this TD */
-		{	.input_seg = xhci->event_ring->first_seg,
-			.start_trb = &xhci->event_ring->first_seg->trbs[0],
-			.end_trb = &xhci->event_ring->first_seg->trbs[3],
-			.input_dma = xhci->event_ring->first_seg->dma + 4*16,
+		/* TRB in this ring, but after this TD */ {
+			.input_ring = xhci->event_ring,
+			.input_seg = first_seg,
+			.start_trb = &first_seg->trbs[0],
+			.end_trb = &first_seg->trbs[3],
+			.input_dma = first_seg->dma + 4*16,
 			.result_seg = NULL,
 		},
-		/* TRB in this ring, but before this TD */
-		{	.input_seg = xhci->event_ring->first_seg,
-			.start_trb = &xhci->event_ring->first_seg->trbs[3],
-			.end_trb = &xhci->event_ring->first_seg->trbs[6],
-			.input_dma = xhci->event_ring->first_seg->dma + 2*16,
+		/* TRB in this ring, but before this TD */ {
+			.input_ring = xhci->event_ring,
+			.input_seg = first_seg,
+			.start_trb = &first_seg->trbs[3],
+			.end_trb = &first_seg->trbs[6],
+			.input_dma = first_seg->dma + 2*16,
 			.result_seg = NULL,
 		},
-		/* TRB in this ring, but after this wrapped TD */
-		{	.input_seg = xhci->event_ring->first_seg,
-			.start_trb = &xhci->event_ring->first_seg->trbs[TRBS_PER_SEGMENT - 3],
-			.end_trb = &xhci->event_ring->first_seg->trbs[1],
-			.input_dma = xhci->event_ring->first_seg->dma + 2*16,
+		/* TRB in this ring, but after this wrapped TD */ {
+			.input_ring = xhci->event_ring,
+			.input_seg = first_seg,
+			.start_trb = &first_seg->trbs[TRBS_PER_SEGMENT - 3],
+			.end_trb = &first_seg->trbs[1],
+			.input_dma = first_seg->dma + 2*16,
 			.result_seg = NULL,
 		},
-		/* TRB in this ring, but before this wrapped TD */
-		{	.input_seg = xhci->event_ring->first_seg,
-			.start_trb = &xhci->event_ring->first_seg->trbs[TRBS_PER_SEGMENT - 3],
-			.end_trb = &xhci->event_ring->first_seg->trbs[1],
-			.input_dma = xhci->event_ring->first_seg->dma + (TRBS_PER_SEGMENT - 4)*16,
+		/* TRB in this ring, but before this wrapped TD */ {
+			.input_ring = xhci->event_ring,
+			.input_seg = first_seg,
+			.start_trb = &first_seg->trbs[TRBS_PER_SEGMENT - 3],
+			.end_trb = &first_seg->trbs[1],
+			.input_dma = first_seg->dma + (TRBS_PER_SEGMENT - 4)*16,
 			.result_seg = NULL,
 		},
-		/* TRB not in this ring, and we have a wrapped TD */
-		{	.input_seg = xhci->event_ring->first_seg,
-			.start_trb = &xhci->event_ring->first_seg->trbs[TRBS_PER_SEGMENT - 3],
-			.end_trb = &xhci->event_ring->first_seg->trbs[1],
-			.input_dma = xhci->cmd_ring->first_seg->dma + 2*16,
+		/* TRB not in this ring, and we have a wrapped TD */ {
+			.input_ring = xhci->event_ring,
+			.input_seg = first_seg,
+			.start_trb = &first_seg->trbs[TRBS_PER_SEGMENT - 3],
+			.end_trb = &first_seg->trbs[1],
+			.input_dma = cmd_seg->dma + 2*16,
 			.result_seg = NULL,
 		},
 	};
@@ -2016,9 +2013,10 @@ static int xhci_check_trb_in_td_math(struct xhci_hcd *xhci, gfp_t mem_flags)
 	num_tests = ARRAY_SIZE(simple_test_vector);
 	for (i = 0; i < num_tests; i++) {
 		ret = xhci_test_trb_in_td(xhci,
-				xhci->event_ring->first_seg,
-				xhci->event_ring->first_seg->trbs,
-				&xhci->event_ring->first_seg->trbs[TRBS_PER_SEGMENT - 1],
+				xhci->event_ring,
+				first_seg,
+				first_seg->trbs,
+				&first_seg->trbs[TRBS_PER_SEGMENT - 1],
 				simple_test_vector[i].input_dma,
 				simple_test_vector[i].result_seg,
 				"Simple", i);
@@ -2029,6 +2027,7 @@ static int xhci_check_trb_in_td_math(struct xhci_hcd *xhci, gfp_t mem_flags)
 	num_tests = ARRAY_SIZE(complex_test_vector);
 	for (i = 0; i < num_tests; i++) {
 		ret = xhci_test_trb_in_td(xhci,
+				complex_test_vector[i].input_ring,
 				complex_test_vector[i].input_seg,
 				complex_test_vector[i].start_trb,
 				complex_test_vector[i].end_trb,
@@ -2313,7 +2312,7 @@ int xhci_mem_init(struct xhci_hcd *xhci, gfp_t flags)
 	struct device	*dev = xhci_to_dev(xhci);
 	unsigned int	val, val2;
 	u64		val_64;
-	struct xhci_segment	*seg;
+	struct xhci_segment *seg;
 	u32 page_size, temp;
 	int i;
 
@@ -2394,13 +2393,14 @@ int xhci_mem_init(struct xhci_hcd *xhci, gfp_t flags)
 		goto fail;
 	xhci_dbg_trace(xhci, trace_xhci_dbg_init,
 			"Allocated command ring at %p", xhci->cmd_ring);
+	seg = xhci_ring_first_seg(xhci->cmd_ring);
 	xhci_dbg_trace(xhci, trace_xhci_dbg_init, "First segment DMA is 0x%llx",
-			(unsigned long long)xhci->cmd_ring->first_seg->dma);
+			(unsigned long long)seg->dma);
 
 	/* Set the address in the Command Ring Control register */
 	val_64 = xhci_read_64(xhci, &xhci->op_regs->cmd_ring);
 	val_64 = (val_64 & (u64) CMD_RING_RSVD_BITS) |
-		(xhci->cmd_ring->first_seg->dma & (u64) ~CMD_RING_RSVD_BITS) |
+		(seg->dma & (u64) ~CMD_RING_RSVD_BITS) |
 		xhci->cmd_ring->cycle_state;
 	xhci_dbg_trace(xhci, trace_xhci_dbg_init,
 			"// Setting command ring address to 0x%x", val);
@@ -2459,12 +2459,15 @@ int xhci_mem_init(struct xhci_hcd *xhci, gfp_t flags)
 			(unsigned long long)xhci->erst.erst_dma_addr);
 
 	/* set ring base address and size for each segment table entry */
-	for (val = 0, seg = xhci->event_ring->first_seg; val < ERST_NUM_SEGS; val++) {
+	val = 0;
+	list_for_each_entry(seg, &xhci->event_ring->segments, list) {
 		struct xhci_erst_entry *entry = &xhci->erst.entries[val];
+
 		entry->seg_addr = cpu_to_le64(seg->dma);
 		entry->seg_size = cpu_to_le32(TRBS_PER_SEGMENT);
 		entry->rsvd = 0;
-		seg = seg->next;
+		if (++val >= ERST_NUM_SEGS)
+			break;
 	}
 
 	/* set ERST count with the number of entries in the segment table */
