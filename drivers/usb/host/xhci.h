@@ -1321,6 +1321,17 @@ enum xhci_ring_type {
 	TYPE_EVENT,
 };
 
+struct xhci_ring_ops {
+	bool (*last_trb)(struct xhci_ring *ring, struct xhci_segment *seg,
+			union xhci_trb *trb);
+	bool (*last_trb_ring)(struct xhci_ring *ring, struct xhci_segment *seg,
+			union xhci_trb *trb);
+	void (*inc_enq)(struct xhci_ring *ring, bool more_trbs_coming);
+	void (*inc_deq)(struct xhci_ring *ring);
+	void (*link_segments)(struct xhci_segment *prev,
+			struct xhci_segment *next);
+};
+
 struct xhci_ring {
 	struct list_head	segments;
 	union  xhci_trb		*enqueue;
@@ -1340,10 +1351,17 @@ struct xhci_ring {
 	unsigned int		num_segs;
 	unsigned int		num_trbs_free;
 	unsigned int		num_trbs_free_temp;
-	enum xhci_ring_type	type;
 	bool			last_td_was_short;
+	bool			is_command;
+	bool			is_stream;
 	struct radix_tree_root	*trb_address_map;
+	const struct xhci_ring_ops *ops;
 };
+
+static inline void xhci_ring_inc_deq(struct xhci_ring *ring)
+{
+	ring->ops->inc_deq(ring);
+}
 
 static inline struct xhci_segment *xhci_ring_first_seg(struct xhci_ring *ring)
 {
@@ -1363,6 +1381,10 @@ static inline struct xhci_segment *xhci_segment_next(struct xhci_ring *ring,
 	else
 		return list_next_entry(seg, list);
 }
+
+void xhci_ring_init_type(struct xhci_hcd *xhci, struct xhci_ring *ring,
+		enum xhci_ring_type type);
+bool xhci_is_event_ring(struct xhci_ring *ring);
 
 struct xhci_erst_entry {
 	/* 64-bit event ring segment address */
@@ -1660,9 +1682,9 @@ static inline void xhci_write_64(struct xhci_hcd *xhci,
 	writel(val_hi, ptr + 1);
 }
 
-static inline int xhci_link_trb_quirk(struct xhci_hcd *xhci)
+static inline bool xhci_link_trb_quirk(struct xhci_hcd *xhci)
 {
-	return xhci->quirks & XHCI_LINK_TRB_QUIRK;
+	return !!(xhci->quirks & XHCI_LINK_TRB_QUIRK);
 }
 
 /* xHCI debugging */

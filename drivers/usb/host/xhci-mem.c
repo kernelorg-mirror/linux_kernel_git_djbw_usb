@@ -96,36 +96,6 @@ static void xhci_free_segments(struct list_head *segments)
 }
 
 /*
- * Change the last TRB in the prev segment to be a Link TRB which points to the
- * DMA address of the next segment.  The caller needs to set any Link TRB
- * related flags, such as End TRB, Toggle Cycle, and no snoop.
- */
-static void xhci_link_segments(struct xhci_hcd *xhci, struct xhci_segment *prev,
-		struct xhci_segment *next, enum xhci_ring_type type)
-{
-	u32 val;
-
-	if (!prev || !next)
-		return;
-	if (type != TYPE_EVENT) {
-		prev->link = &prev->trbs[TRBS_PER_SEGMENT-1];
-		prev->link->link.segment_ptr = cpu_to_le64(next->dma);
-
-		/* Set the last TRB in the segment to have a TRB type ID of Link TRB */
-		val = le32_to_cpu(prev->link->link.control);
-		val &= ~TRB_TYPE_BITMASK;
-		val |= TRB_TYPE(TRB_LINK);
-		/* Always set the chain bit with 0.95 hardware */
-		/* Set chain bit for isoc rings on AMD 0.96 host */
-		if (xhci_link_trb_quirk(xhci) ||
-				(type == TYPE_ISOC &&
-				 (xhci->quirks & XHCI_AMD_0x96_HOST)))
-			val |= TRB_CHAIN;
-		prev->link->link.control = cpu_to_le32(val);
-	}
-}
-
-/*
  * Link the ring to the new segments.
  * Set Toggle Cycle for the new ring if needed.
  */
@@ -141,8 +111,8 @@ static void xhci_link_rings(struct xhci_hcd *xhci, struct xhci_ring *ring,
 	insert_next = xhci_segment_next(ring, insert_head);
 
 	/* link them physically */
-	xhci_link_segments(xhci, insert_head, new_head, ring->type);
-	xhci_link_segments(xhci, new_tail, insert_next, ring->type);
+	ring->ops->link_segments(insert_head, new_head);
+	ring->ops->link_segments(new_tail, insert_next);
 
 	/* link them logically */
 	list_splice_init(segments, &insert_head->list);
@@ -150,7 +120,8 @@ static void xhci_link_rings(struct xhci_hcd *xhci, struct xhci_ring *ring,
 	ring->num_segs += num_segs;
 	ring->num_trbs_free += (TRBS_PER_SEGMENT - 1) * num_segs;
 
-	if (ring->type != TYPE_EVENT && insert_head == last_seg) {
+	BUG_ON(xhci_is_event_ring(ring));
+	if (insert_head == last_seg) {
 		last_seg->link->link.control &= ~cpu_to_le32(LINK_TOGGLE);
 		new_tail->link->link.control |= cpu_to_le32(LINK_TOGGLE);
 	}
@@ -276,7 +247,7 @@ void xhci_ring_free(struct xhci_ring *ring)
 		return;
 
 	if (!list_empty(&ring->segments)) {
-		if (ring->type == TYPE_STREAM)
+		if (ring->is_stream)
 			xhci_remove_stream_mapping(ring);
 		xhci_free_segments(&ring->segments);
 	}
@@ -316,7 +287,8 @@ static void xhci_initialize_ring_info(struct xhci_ring *ring,
 /* Allocate segments and link them for a ring */
 static int xhci_alloc_segments_for_ring(struct xhci_hcd *xhci,
 		struct list_head *segments, unsigned int num_segs,
-		unsigned int cycle_state, enum xhci_ring_type type, gfp_t flags)
+		unsigned int cycle_state, const struct xhci_ring_ops *ops,
+		gfp_t flags)
 {
 	struct xhci_segment *seg;
 	int i;
@@ -338,7 +310,7 @@ static int xhci_alloc_segments_for_ring(struct xhci_hcd *xhci,
 
 		if (&next->list == segments)
 			next = list_first_entry(segments, typeof(*next), list);
-		xhci_link_segments(xhci, seg, next, type);
+		ops->link_segments(seg, next);
 	}
 
 	return 0;
@@ -362,20 +334,20 @@ static struct xhci_ring *xhci_ring_alloc(struct xhci_hcd *xhci,
 	if (!ring)
 		return NULL;
 
+	xhci_ring_init_type(xhci, ring, type);
 	ring->num_segs = num_segs;
 	INIT_LIST_HEAD(&ring->segments);
 	INIT_LIST_HEAD(&ring->td_list);
-	ring->type = type;
 	if (num_segs == 0)
 		return ring;
 
 	ret = xhci_alloc_segments_for_ring(xhci, &ring->segments, num_segs,
-			cycle_state, type, flags);
+			cycle_state, ring->ops, flags);
 	if (ret)
 		goto fail;
 
 	/* Only event ring does not use link TRB */
-	if (type != TYPE_EVENT) {
+	if (!xhci_is_event_ring(ring)) {
 		struct xhci_segment *last_seg = xhci_ring_last_seg(ring);
 
 		/* See section 4.9.2.1 and 6.4.4.1 */
@@ -417,11 +389,12 @@ void xhci_free_or_cache_endpoint_ring(struct xhci_hcd *xhci,
  * pointers to the beginning of the ring.
  */
 static void xhci_reinit_cached_ring(struct xhci_hcd *xhci,
-			struct xhci_ring *ring, unsigned int cycle_state,
-			enum xhci_ring_type type)
+		struct xhci_ring *ring, unsigned int cycle_state,
+		enum xhci_ring_type type)
 {
 	struct xhci_segment *seg;
 
+	xhci_ring_init_type(xhci, ring, type);
 	list_for_each_entry(seg, &ring->segments, list) {
 		struct xhci_segment *next = xhci_segment_next(ring, seg);
 		int i;
@@ -434,9 +407,9 @@ static void xhci_reinit_cached_ring(struct xhci_hcd *xhci,
 					cpu_to_le32(TRB_CYCLE);
 		}
 		/* All endpoint rings have link TRBs */
-		xhci_link_segments(xhci, seg, next, type);
+		ring->ops->link_segments(seg, next);
+
 	}
-	ring->type = type;
 	xhci_initialize_ring_info(ring, cycle_state);
 	/* td list should be empty since all URBs have been cancelled,
 	 * but just in case...
@@ -465,11 +438,11 @@ int xhci_ring_expansion(struct xhci_hcd *xhci, struct xhci_ring *ring,
 			ring->num_segs : num_segs_needed;
 
 	ret = xhci_alloc_segments_for_ring(xhci, &segments,
-			num_segs, ring->cycle_state, ring->type, flags);
+			num_segs, ring->cycle_state, ring->ops, flags);
 	if (ret)
 		return -ENOMEM;
 
-	if (ring->type == TYPE_STREAM)
+	if (ring->is_stream)
 		ret = xhci_update_stream_segment_mapping(ring->trb_address_map,
 						ring, &segments, flags);
 	if (ret) {
