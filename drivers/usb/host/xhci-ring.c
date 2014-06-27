@@ -2767,7 +2767,7 @@ static int xhci_handle_event(struct xhci_hcd *xhci)
 	int update_ptrs = 1;
 	int ret;
 
-	if (!xhci->event_ring || !xhci->event_ring->dequeue) {
+	if (!xhci->event_ring) {
 		xhci->error_bitmask |= 1 << 1;
 		return 0;
 	}

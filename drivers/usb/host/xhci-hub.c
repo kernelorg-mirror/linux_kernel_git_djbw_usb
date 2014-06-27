@@ -285,7 +285,7 @@ static int xhci_stop_device(struct xhci_hcd *xhci, int slot_id, int suspend)
 
 	spin_lock_irqsave(&xhci->lock, flags);
 	for (i = LAST_EP_INDEX; i > 0; i--) {
-		if (virt_dev->eps[i].ring && virt_dev->eps[i].ring->dequeue) {
+		if (virt_dev->eps[i].ring) {
 			struct xhci_command *command;
 			command = xhci_alloc_command(xhci, false, false,
 						     GFP_NOWAIT);
@@ -322,8 +322,7 @@ void xhci_ring_device(struct xhci_hcd *xhci, int slot_id)
 	int i;
 
 	for (i = 0; i < LAST_EP_INDEX + 1; i++)
-		if (xhci->devs[slot_id]->eps[i].ring &&
-		    xhci->devs[slot_id]->eps[i].ring->dequeue)
+		if (xhci->devs[slot_id]->eps[i].ring)
 			xhci_ring_ep_doorbell(xhci, slot_id, i, 0);
 
 	return;
