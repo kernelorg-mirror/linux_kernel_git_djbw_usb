@@ -794,7 +794,7 @@ static void xhci_set_cmd_ring_deq(struct xhci_hcd *xhci)
 	val_64 = xhci_read_64(xhci, &xhci->op_regs->cmd_ring);
 	val_64 = (val_64 & (u64) CMD_RING_RSVD_BITS) |
 		(xhci_trb_virt_to_dma(xhci->cmd_ring->deq_seg,
-				      xhci->cmd_ring->dequeue) &
+				      xhci_ring_dequeue(xhci->cmd_ring)) &
 		 (u64) ~CMD_RING_RSVD_BITS) |
 		xhci->cmd_ring->cycle_state;
 	xhci_dbg_trace(xhci, trace_xhci_dbg_init,
@@ -830,9 +830,9 @@ static void xhci_clear_command_ring(struct xhci_hcd *xhci)
 
 	/* Reset the software enqueue and dequeue pointers */
 	ring->deq_seg = first_seg;
-	ring->dequeue = first_seg->trbs;
+	xhci_ring_set_dequeue(ring, first_seg->trbs);
 	ring->enq_seg = ring->deq_seg;
-	ring->enqueue = ring->dequeue;
+	xhci_ring_set_enqueue(ring, xhci_ring_dequeue(ring));
 
 	ring->num_trbs_free = ring->num_segs * (TRBS_PER_SEGMENT - 1) - 1;
 	/*

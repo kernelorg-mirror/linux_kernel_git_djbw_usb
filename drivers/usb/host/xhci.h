@@ -1334,10 +1334,10 @@ struct xhci_ring_ops {
 
 struct xhci_ring {
 	struct list_head	segments;
-	union  xhci_trb		*enqueue;
+	union  xhci_trb		*enq;
 	struct xhci_segment	*enq_seg;
 	unsigned int		enq_updates;
-	union  xhci_trb		*dequeue;
+	union  xhci_trb		*deq;
 	struct xhci_segment	*deq_seg;
 	unsigned int		deq_updates;
 	struct list_head	td_list;
@@ -1357,6 +1357,29 @@ struct xhci_ring {
 	struct radix_tree_root	*trb_address_map;
 	const struct xhci_ring_ops *ops;
 };
+
+static inline union xhci_trb *xhci_ring_enqueue(struct xhci_ring *ring)
+{
+	return ring->enq;
+}
+
+static inline union xhci_trb *xhci_ring_dequeue(struct xhci_ring *ring)
+{
+	return ring->deq;
+}
+
+static inline void xhci_ring_set_enqueue(struct xhci_ring *ring,
+	union xhci_trb *enqueue)
+{
+	ring->enq = enqueue;
+}
+
+static inline void xhci_ring_set_dequeue(struct xhci_ring *ring,
+	union xhci_trb *dequeue)
+{
+	ring->deq = dequeue;
+}
+
 
 static inline void xhci_ring_inc_deq(struct xhci_ring *ring)
 {

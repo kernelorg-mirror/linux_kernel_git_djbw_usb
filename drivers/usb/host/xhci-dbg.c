@@ -328,16 +328,16 @@ void xhci_debug_segment(struct xhci_hcd *xhci, struct xhci_segment *seg)
 
 void xhci_dbg_ring_ptrs(struct xhci_hcd *xhci, struct xhci_ring *ring)
 {
-	xhci_dbg(xhci, "Ring deq = %p (virt), 0x%llx (dma)\n",
-			ring->dequeue,
-			(unsigned long long)xhci_trb_virt_to_dma(ring->deq_seg,
-							    ring->dequeue));
+	dma_addr_t dma;
+
+	dma = xhci_trb_virt_to_dma(ring->deq_seg, xhci_ring_dequeue(ring));
+	xhci_dbg(xhci, "Ring deq = %p (virt), %pad (dma)\n",
+			xhci_ring_dequeue(ring), &dma);
 	xhci_dbg(xhci, "Ring deq updated %u times\n",
 			ring->deq_updates);
-	xhci_dbg(xhci, "Ring enq = %p (virt), 0x%llx (dma)\n",
-			ring->enqueue,
-			(unsigned long long)xhci_trb_virt_to_dma(ring->enq_seg,
-							    ring->enqueue));
+	dma = xhci_trb_virt_to_dma(ring->enq_seg, xhci_ring_enqueue(ring));
+	xhci_dbg(xhci, "Ring enq = %p (virt), %pad (dma)\n",
+			xhci_ring_enqueue(ring), &dma);
 	xhci_dbg(xhci, "Ring enq updated %u times\n",
 			ring->enq_updates);
 }

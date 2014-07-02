@@ -261,9 +261,9 @@ static void xhci_initialize_ring_info(struct xhci_ring *ring,
 	struct xhci_segment *first_seg = xhci_ring_first_seg(ring);
 
 	/* The ring is empty, so the enqueue pointer == dequeue pointer */
-	ring->enqueue = first_seg->trbs;
+	xhci_ring_set_enqueue(ring, first_seg->trbs);
 	ring->enq_seg = first_seg;
-	ring->dequeue = ring->enqueue;
+	xhci_ring_set_dequeue(ring, xhci_ring_enqueue(ring));
 	ring->deq_seg = first_seg;
 	/* The ring is initialized to 0. The producer must write 1 to the cycle
 	 * bit to handover ownership of the TRB, so PCS = 1.  The consumer must
@@ -749,9 +749,11 @@ void xhci_setup_no_streams_ep_input_ctx(struct xhci_hcd *xhci,
 		struct xhci_ep_ctx *ep_ctx,
 		struct xhci_virt_ep *ep)
 {
+	struct xhci_ring *ring = ep->ring;
 	dma_addr_t addr;
+
 	ep_ctx->ep_info &= cpu_to_le32(~(EP_MAXPSTREAMS_MASK | EP_HAS_LSA));
-	addr = xhci_trb_virt_to_dma(ep->ring->deq_seg, ep->ring->dequeue);
+	addr = xhci_trb_virt_to_dma(ring->deq_seg, xhci_ring_dequeue(ring));
 	ep_ctx->deq  = cpu_to_le64(addr | ep->ring->cycle_state);
 }
 
@@ -1014,8 +1016,8 @@ void xhci_copy_ep0_dequeue_into_input_ctx(struct xhci_hcd *xhci,
 	 * been completed or cancelled before the reset.
 	 */
 	ep0_ctx->deq = cpu_to_le64(xhci_trb_virt_to_dma(ep_ring->enq_seg,
-							ep_ring->enqueue)
-				   | ep_ring->cycle_state);
+				xhci_ring_enqueue(ep_ring))
+			| ep_ring->cycle_state);
 }
 
 /*
@@ -2020,7 +2022,7 @@ static void xhci_set_hc_event_deq(struct xhci_hcd *xhci)
 	dma_addr_t deq;
 
 	deq = xhci_trb_virt_to_dma(xhci->event_ring->deq_seg,
-			xhci->event_ring->dequeue);
+			xhci_ring_dequeue(xhci->event_ring));
 	if (deq == 0 && !in_interrupt())
 		xhci_warn(xhci, "WARN something wrong with SW event ring "
 				"dequeue ptr.\n");

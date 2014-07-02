@@ -122,7 +122,7 @@ static bool ep_last_trb(struct xhci_ring *ring, struct xhci_segment *seg,
 
 static int enqueue_is_link_trb(struct xhci_ring *ring)
 {
-	struct xhci_link_trb *link = &ring->enqueue->link;
+	struct xhci_link_trb *link = &xhci_ring_enqueue(ring)->link;
 	return TRB_TYPE_LINK_LE32(link->control);
 }
 
@@ -148,11 +148,11 @@ static void next_trb(struct xhci_ring *ring, struct xhci_segment **seg,
 static void event_inc_deq(struct xhci_ring *ring)
 {
 	ring->deq_updates++;
-	ring->dequeue++;
+	xhci_ring_set_dequeue(ring, xhci_ring_dequeue(ring) + 1);
 
-	if (ring->ops->last_trb(ring, ring->deq_seg, ring->dequeue)) {
+	if (ring->ops->last_trb(ring, ring->deq_seg, xhci_ring_dequeue(ring))) {
 		ring->deq_seg = xhci_segment_next(ring, ring->deq_seg);
-		ring->dequeue = ring->deq_seg->trbs;
+		xhci_ring_set_dequeue(ring, ring->deq_seg->trbs);
 		ring->cycle_state ^= 1;
 	}
 }
@@ -161,18 +161,21 @@ static void ep_inc_deq(struct xhci_ring *ring)
 {
 	ring->deq_updates++;
 
-	if (!ring->ops->last_trb(ring, ring->deq_seg, ring->dequeue))
+	if (!ring->ops->last_trb(ring, ring->deq_seg, xhci_ring_dequeue(ring)))
 		ring->num_trbs_free++;
 
 	do {
 		/* Update the dequeue pointer further if that was a link TRB */
-		if (ring->ops->last_trb(ring, ring->deq_seg, ring->dequeue)) {
+		if (ring->ops->last_trb(ring, ring->deq_seg,
+					xhci_ring_dequeue(ring))) {
 			ring->deq_seg = xhci_segment_next(ring, ring->deq_seg);
-			ring->dequeue = ring->deq_seg->trbs;
+			xhci_ring_set_dequeue(ring, ring->deq_seg->trbs);
 		} else {
-			ring->dequeue++;
+			xhci_ring_set_dequeue(ring,
+					xhci_ring_dequeue(ring) + 1);
 		}
-	} while (ring->ops->last_trb(ring, ring->deq_seg, ring->dequeue));
+	} while (ring->ops->last_trb(ring, ring->deq_seg,
+				xhci_ring_dequeue(ring)));
 }
 
 /*
@@ -181,7 +184,7 @@ static void ep_inc_deq(struct xhci_ring *ring)
  */
 static void advance_enq(struct xhci_ring *ring, u32 chain, bool do_carry_chain)
 {
-	union xhci_trb *next = ring->enqueue;
+	union xhci_trb *next = xhci_ring_enqueue(ring);
 
 	/*
 	 * Update the enqueue pointer further if we're now pointing to a
@@ -203,8 +206,8 @@ static void advance_enq(struct xhci_ring *ring, u32 chain, bool do_carry_chain)
 		if (ring->ops->last_trb_ring(ring, ring->enq_seg, next))
 			ring->cycle_state ^= 1;
 		ring->enq_seg = xhci_segment_next(ring, ring->enq_seg);
-		ring->enqueue = ring->enq_seg->trbs;
-		next = ring->enqueue;
+		xhci_ring_set_enqueue(ring, ring->enq_seg->trbs);
+		next = xhci_ring_enqueue(ring);
 	}
 }
 
@@ -225,10 +228,11 @@ static void advance_enq(struct xhci_ring *ring, u32 chain, bool do_carry_chain)
 static void common_inc_enq(struct xhci_ring *ring, bool more_trbs_coming,
 		bool do_carry_chain)
 {
-	u32 chain = le32_to_cpu(ring->enqueue->generic.field[3]) & TRB_CHAIN;
+	union xhci_trb *enqueue = xhci_ring_enqueue(ring);
+	u32 chain = le32_to_cpu(enqueue->generic.field[3]) & TRB_CHAIN;
 
 	ring->num_trbs_free--;
-	(ring->enqueue)++;
+	xhci_ring_set_enqueue(ring, enqueue + 1);
 	ring->enq_updates++;
 
 	/*
@@ -263,16 +267,16 @@ static void chain_quirk_inc_enq(struct xhci_ring *ring, bool more_trbs_coming)
  */
 static void event_inc_enq(struct xhci_ring *ring, bool unused)
 {
-	ring->enqueue++;
+	xhci_ring_set_enqueue(ring, xhci_ring_enqueue(ring) + 1);
 	ring->enq_updates++;
 
 	/*
 	 * Fix up the enqueue pointer if we're at the end of an event
 	 * ring segment (which doesn't have link TRBS)
 	 */
-	if (ring->ops->last_trb(ring, ring->enq_seg, ring->enqueue)) {
+	if (ring->ops->last_trb(ring, ring->enq_seg, xhci_ring_enqueue(ring))) {
 		ring->enq_seg = xhci_segment_next(ring, ring->enq_seg);
-		ring->enqueue = ring->enq_seg->trbs;
+		xhci_ring_set_enqueue(ring, ring->enq_seg->trbs);
 	}
 }
 
@@ -413,7 +417,8 @@ static inline int room_on_ring(struct xhci_hcd *xhci, struct xhci_ring *ring,
 		return 0;
 
 	if (!ring->is_command && !xhci_is_event_ring(ring)) {
-		num_trbs_in_deq_seg = ring->dequeue - ring->deq_seg->trbs;
+		num_trbs_in_deq_seg = xhci_ring_dequeue(ring)
+			- ring->deq_seg->trbs;
 		if (ring->num_trbs_free < num_trbs + num_trbs_in_deq_seg)
 			return 0;
 	}
@@ -639,12 +644,12 @@ void xhci_find_new_dequeue_state(struct xhci_hcd *xhci,
 
 	/* Find virtual address and segment of hardware dequeue pointer */
 	state->new_deq_seg = ep_ring->deq_seg;
-	state->new_deq_ptr = ep_ring->dequeue;
+	state->new_deq_ptr = xhci_ring_dequeue(ep_ring);
 	while (xhci_trb_virt_to_dma(state->new_deq_seg, state->new_deq_ptr)
 			!= (dma_addr_t)(hw_dequeue & ~0xf)) {
 		next_trb(ep_ring, &state->new_deq_seg,
 					&state->new_deq_ptr);
-		if (state->new_deq_ptr == ep_ring->dequeue) {
+		if (state->new_deq_ptr == xhci_ring_dequeue(ep_ring)) {
 			WARN_ON(1);
 			return;
 		}
@@ -1107,12 +1112,13 @@ static void update_ring_for_set_deq_completion(struct xhci_hcd *xhci,
 		struct xhci_ring *ep_ring,
 		unsigned int ep_index)
 {
+	struct xhci_virt_ep *ep = &dev->eps[ep_index];
 	union xhci_trb *dequeue_temp;
 	int num_trbs_free_temp;
 	bool revert = false;
 
 	num_trbs_free_temp = ep_ring->num_trbs_free;
-	dequeue_temp = ep_ring->dequeue;
+	dequeue_temp = xhci_ring_dequeue(ep_ring);
 
 	/* If we get two back-to-back stalls, and the first stalled transfer
 	 * ends just before a link TRB, the dequeue pointer will be left on
@@ -1120,26 +1126,25 @@ static void update_ring_for_set_deq_completion(struct xhci_hcd *xhci,
 	 * the dequeue pointer one segment further, or we'll jump off
 	 * the segment into la-la-land.
 	 */
-	if (ep_ring->ops->last_trb(ep_ring, ep_ring->deq_seg,
-				ep_ring->dequeue)) {
+	if (ep_ring->ops->last_trb(ep_ring, ep_ring->deq_seg, dequeue_temp)) {
 		ep_ring->deq_seg = xhci_segment_next(ep_ring, ep_ring->deq_seg);
-		ep_ring->dequeue = ep_ring->deq_seg->trbs;
+		xhci_ring_set_dequeue(ep_ring, ep_ring->deq_seg->trbs);
 	}
 
-	while (ep_ring->dequeue != dev->eps[ep_index].queued_deq_ptr) {
+	while (xhci_ring_dequeue(ep_ring) != ep->queued_deq_ptr) {
 		/* We have more usable TRBs */
 		ep_ring->num_trbs_free++;
-		ep_ring->dequeue++;
+		xhci_ring_set_dequeue(ep_ring, xhci_ring_dequeue(ep_ring) + 1);
 		if (ep_ring->ops->last_trb(ep_ring, ep_ring->deq_seg,
-				ep_ring->dequeue)) {
-			if (ep_ring->dequeue ==
+				xhci_ring_dequeue(ep_ring))) {
+			if (xhci_ring_dequeue(ep_ring) ==
 					dev->eps[ep_index].queued_deq_ptr)
 				break;
 			ep_ring->deq_seg = xhci_segment_next(ep_ring,
 					ep_ring->deq_seg);
-			ep_ring->dequeue = ep_ring->deq_seg->trbs;
+			xhci_ring_set_dequeue(ep_ring, ep_ring->deq_seg->trbs);
 		}
-		if (ep_ring->dequeue == dequeue_temp) {
+		if (xhci_ring_dequeue(ep_ring) == dequeue_temp) {
 			revert = true;
 			break;
 		}
@@ -1408,6 +1413,7 @@ void xhci_cleanup_command_queue(struct xhci_hcd *xhci)
 static void xhci_handle_stopped_cmd_ring(struct xhci_hcd *xhci,
 					 struct xhci_command *cur_cmd)
 {
+	struct xhci_ring *cmd_ring = xhci->cmd_ring;
 	struct xhci_command *i_cmd, *tmp_cmd;
 	u32 cycle_state;
 
@@ -1441,8 +1447,8 @@ static void xhci_handle_stopped_cmd_ring(struct xhci_hcd *xhci,
 	xhci->cmd_ring_state = CMD_RING_STATE_RUNNING;
 
 	/* ring command ring doorbell to restart the command ring */
-	if ((xhci->cmd_ring->dequeue != xhci->cmd_ring->enqueue) &&
-	    !(xhci->xhc_state & XHCI_STATE_DYING)) {
+	if ((xhci_ring_dequeue(cmd_ring) != xhci_ring_enqueue(cmd_ring))
+			&& !(xhci->xhc_state & XHCI_STATE_DYING)) {
 		xhci->current_cmd = cur_cmd;
 		mod_timer(&xhci->cmd_timer, jiffies + XHCI_CMD_DEFAULT_TIMEOUT);
 		xhci_ring_cmd_db(xhci);
@@ -1503,7 +1509,7 @@ static void handle_cmd_completion(struct xhci_hcd *xhci,
 	u32 cmd_type;
 
 	cmd_dma = le64_to_cpu(event->cmd_trb);
-	cmd_trb = xhci->cmd_ring->dequeue;
+	cmd_trb = xhci_ring_dequeue(xhci->cmd_ring);
 	cmd_dequeue_dma = xhci_trb_virt_to_dma(xhci->cmd_ring->deq_seg,
 			cmd_trb);
 	/* Is the command ring deq ptr out of sync with the deq seg ptr? */
@@ -1519,7 +1525,7 @@ static void handle_cmd_completion(struct xhci_hcd *xhci,
 
 	cmd = list_entry(xhci->cmd_list.next, struct xhci_command, cmd_list);
 
-	if (cmd->command_trb != xhci->cmd_ring->dequeue) {
+	if (cmd->command_trb != xhci_ring_dequeue(xhci->cmd_ring)) {
 		xhci_err(xhci,
 			 "Command completion event does not match command\n");
 		return;
@@ -2044,7 +2050,7 @@ static int finish_td(struct xhci_hcd *xhci, struct xhci_td *td,
 					td, event_trb);
 		} else {
 			/* Update ring dequeue pointer */
-			while (ep_ring->dequeue != td->last_trb)
+			while (xhci_ring_dequeue(ep_ring) != td->last_trb)
 				xhci_ring_inc_deq(ep_ring);
 			xhci_ring_inc_deq(ep_ring);
 		}
@@ -2118,7 +2124,7 @@ static int process_ctrl_td(struct xhci_hcd *xhci, struct xhci_td *td,
 
 	switch (trb_comp_code) {
 	case COMP_SUCCESS:
-		if (event_trb == ep_ring->dequeue) {
+		if (event_trb == xhci_ring_dequeue(ep_ring)) {
 			xhci_warn(xhci, "WARN: Success on ctrl setup TRB "
 					"without IOC set??\n");
 			*status = -ESHUTDOWN;
@@ -2149,7 +2155,7 @@ static int process_ctrl_td(struct xhci_hcd *xhci, struct xhci_td *td,
 		/* else fall through */
 	case COMP_STALL:
 		/* Did we transfer part of the data (middle) phase? */
-		if (event_trb != ep_ring->dequeue &&
+		if (event_trb != xhci_ring_dequeue(ep_ring) &&
 				event_trb != td->last_trb)
 			td->urb->actual_length =
 				td->urb->transfer_buffer_length -
@@ -2165,7 +2171,7 @@ static int process_ctrl_td(struct xhci_hcd *xhci, struct xhci_td *td,
 	 * Did we transfer any data, despite the errors that might have
 	 * happened?  I.e. did we get past the setup stage?
 	 */
-	if (event_trb != ep_ring->dequeue) {
+	if (event_trb != xhci_ring_dequeue(ep_ring)) {
 		/* The event was for the status stage */
 		if (event_trb == td->last_trb) {
 			if (td->urb->actual_length != 0) {
@@ -2258,7 +2264,7 @@ static int process_isoc_td(struct xhci_hcd *xhci, struct xhci_td *td,
 		frame->actual_length = frame->length;
 		td->urb->actual_length += frame->length;
 	} else {
-		for (cur_trb = ep_ring->dequeue,
+		for (cur_trb = xhci_ring_dequeue(ep_ring),
 		     cur_seg = ep_ring->deq_seg; cur_trb != event_trb;
 		     next_trb(ep_ring, &cur_seg, &cur_trb)) {
 			if (!TRB_TYPE_NOOP_LE32(cur_trb->generic.field[3]) &&
@@ -2298,7 +2304,7 @@ static int skip_isoc_td(struct xhci_hcd *xhci, struct xhci_td *td,
 	frame->actual_length = 0;
 
 	/* Update ring dequeue pointer */
-	while (ep_ring->dequeue != td->last_trb)
+	while (xhci_ring_dequeue(ep_ring) != td->last_trb)
 		xhci_ring_inc_deq(ep_ring);
 	xhci_ring_inc_deq(ep_ring);
 
@@ -2391,7 +2397,8 @@ static int process_bulk_intr_td(struct xhci_hcd *xhci, struct xhci_td *td,
 		 * pointer, to get the actual length transferred.
 		 */
 		td->urb->actual_length = 0;
-		for (cur_trb = ep_ring->dequeue, cur_seg = ep_ring->deq_seg;
+		for (cur_trb = xhci_ring_dequeue(ep_ring),
+				cur_seg = ep_ring->deq_seg;
 				cur_trb != event_trb;
 				next_trb(ep_ring, &cur_seg, &cur_trb)) {
 			if (!TRB_TYPE_NOOP_LE32(cur_trb->generic.field[3]) &&
@@ -2446,7 +2453,7 @@ static int handle_tx_event(struct xhci_hcd *xhci,
 		xhci_err(xhci, "@%016llx %08x %08x %08x %08x\n",
 			 (unsigned long long) xhci_trb_virt_to_dma(
 				 xhci->event_ring->deq_seg,
-				 xhci->event_ring->dequeue),
+				 xhci_ring_dequeue(xhci->event_ring)),
 			 lower_32_bits(le64_to_cpu(event->buffer)),
 			 upper_32_bits(le64_to_cpu(event->buffer)),
 			 le32_to_cpu(event->transfer_len),
@@ -2469,7 +2476,7 @@ static int handle_tx_event(struct xhci_hcd *xhci,
 		xhci_err(xhci, "@%016llx %08x %08x %08x %08x\n",
 			 (unsigned long long) xhci_trb_virt_to_dma(
 				 xhci->event_ring->deq_seg,
-				 xhci->event_ring->dequeue),
+				 xhci_ring_dequeue(xhci->event_ring)),
 			 lower_32_bits(le64_to_cpu(event->buffer)),
 			 upper_32_bits(le64_to_cpu(event->buffer)),
 			 le32_to_cpu(event->transfer_len),
@@ -2625,15 +2632,16 @@ static int handle_tx_event(struct xhci_hcd *xhci,
 
 		/* Is this a TRB in the currently executing TD? */
 		event_seg = trb_in_td(ep_ring, ep_ring->deq_seg,
-				ep_ring->dequeue, td->last_trb, event_dma);
+				xhci_ring_dequeue(ep_ring), td->last_trb,
+				event_dma);
 
 		/*
 		 * Skip the Force Stopped Event. The event_trb(event_dma) of FSE
-		 * is not in the current TD pointed by ep_ring->dequeue because
-		 * that the hardware dequeue pointer still at the previous TRB
-		 * of the current TD. The previous TRB maybe a Link TD or the
-		 * last TRB of the previous TD. The command completion handle
-		 * will take care the rest.
+		 * is not in the current TD pointed by the local ep_ring dequeue
+		 * pointer because that the hardware dequeue pointer still at
+		 * the previous TRB of the current TD. The previous TRB maybe a
+		 * Link TD or the last TRB of the previous TD. The command
+		 * completion handle will take care the rest.
 		 */
 		if (!event_seg && trb_comp_code == COMP_STOP_INVAL) {
 			ret = 0;
@@ -2772,7 +2780,7 @@ static int xhci_handle_event(struct xhci_hcd *xhci)
 		return 0;
 	}
 
-	event = xhci->event_ring->dequeue;
+	event = xhci_ring_dequeue(xhci->event_ring);
 	/* Does the HC or OS own the TRB? */
 	if ((le32_to_cpu(event->event_cmd.flags) & TRB_CYCLE) !=
 	    xhci->event_ring->cycle_state) {
@@ -2893,7 +2901,7 @@ hw_died:
 		return IRQ_HANDLED;
 	}
 
-	event_ring_deq = xhci->event_ring->dequeue;
+	event_ring_deq = xhci_ring_dequeue(xhci->event_ring);
 	/* FIXME this should be a delayed service routine
 	 * that clears the EHB.
 	 */
@@ -2901,9 +2909,9 @@ hw_died:
 
 	temp_64 = xhci_read_64(xhci, &xhci->ir_set->erst_dequeue);
 	/* If necessary, update the HW's version of the event ring deq ptr. */
-	if (event_ring_deq != xhci->event_ring->dequeue) {
+	if (event_ring_deq != xhci_ring_dequeue(xhci->event_ring)) {
 		deq = xhci_trb_virt_to_dma(xhci->event_ring->deq_seg,
-				xhci->event_ring->dequeue);
+				xhci_ring_dequeue(xhci->event_ring));
 		if (deq == 0)
 			xhci_warn(xhci, "WARN something wrong with SW event "
 					"ring dequeue ptr.\n");
@@ -2938,13 +2946,13 @@ irqreturn_t xhci_msi_irq(int irq, void *hcd)
 static void queue_trb(struct xhci_ring *ring, bool more_trbs_coming,
 		u32 field1, u32 field2, u32 field3, u32 field4)
 {
-	struct xhci_generic_trb *trb;
+	union xhci_trb *trb;
 
-	trb = &ring->enqueue->generic;
-	trb->field[0] = cpu_to_le32(field1);
-	trb->field[1] = cpu_to_le32(field2);
-	trb->field[2] = cpu_to_le32(field3);
-	trb->field[3] = cpu_to_le32(field4);
+	trb = xhci_ring_enqueue(ring);
+	trb->generic.field[0] = cpu_to_le32(field1);
+	trb->generic.field[1] = cpu_to_le32(field2);
+	trb->generic.field[2] = cpu_to_le32(field3);
+	trb->generic.field[3] = cpu_to_le32(field4);
 	ring->ops->inc_enq(ring, more_trbs_coming);
 }
 
@@ -3053,7 +3061,7 @@ static int prepare_transfer(struct xhci_hcd *xhci,
 	/* Add this TD to the tail of the endpoint ring's TD list */
 	list_add_tail(&td->td_list, &ep_ring->td_list);
 	td->start_seg = ep_ring->enq_seg;
-	td->first_trb = ep_ring->enqueue;
+	td->first_trb = xhci_ring_enqueue(ep_ring);
 
 	urb_priv->td[td_index] = td;
 
@@ -3111,7 +3119,7 @@ static void check_trb_math(struct urb *urb, int num_trbs, int running_total)
 
 static void giveback_first_trb(struct xhci_hcd *xhci, int slot_id,
 		unsigned int ep_index, unsigned int stream_id, int start_cycle,
-		struct xhci_generic_trb *start_trb)
+		union xhci_trb *start_trb)
 {
 	/*
 	 * Pass all the TRBs to the hardware at once and make sure this write
@@ -3119,9 +3127,9 @@ static void giveback_first_trb(struct xhci_hcd *xhci, int slot_id,
 	 */
 	wmb();
 	if (start_cycle)
-		start_trb->field[3] |= cpu_to_le32(start_cycle);
+		start_trb->generic.field[3] |= cpu_to_le32(start_cycle);
 	else
-		start_trb->field[3] &= cpu_to_le32(~TRB_CYCLE);
+		start_trb->generic.field[3] &= cpu_to_le32(~TRB_CYCLE);
 	xhci_ring_ep_doorbell(xhci, slot_id, ep_index, stream_id);
 }
 
@@ -3227,8 +3235,7 @@ static int queue_bulk_sg_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 	bool first_trb;
 	u64 addr;
 	bool more_trbs_coming;
-
-	struct xhci_generic_trb *start_trb;
+	union xhci_trb *start_trb;
 	int start_cycle;
 
 	ep_ring = xhci_urb_to_transfer_ring(xhci, urb);
@@ -3254,7 +3261,7 @@ static int queue_bulk_sg_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 	 * until we've finished creating all the other TRBs.  The ring's cycle
 	 * state may change as we enqueue the other TRBs, so save it too.
 	 */
-	start_trb = &ep_ring->enqueue->generic;
+	start_trb = xhci_ring_enqueue(ep_ring);
 	start_cycle = ep_ring->cycle_state;
 
 	running_total = 0;
@@ -3297,7 +3304,7 @@ static int queue_bulk_sg_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 			field |= TRB_CHAIN;
 		} else {
 			/* FIXME - add check for ZERO_PACKET flag before this */
-			td->last_trb = ep_ring->enqueue;
+			td->last_trb = xhci_ring_enqueue(ep_ring);
 			field |= TRB_IOC;
 		}
 
@@ -3374,12 +3381,11 @@ int xhci_queue_bulk_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 	struct urb_priv *urb_priv;
 	struct xhci_td *td;
 	int num_trbs;
-	struct xhci_generic_trb *start_trb;
 	bool first_trb;
 	bool more_trbs_coming;
 	int start_cycle;
 	u32 field, length_field;
-
+	union xhci_trb *start_trb;
 	int running_total, trb_buff_len, ret;
 	unsigned int total_packet_count;
 	u64 addr;
@@ -3423,7 +3429,7 @@ int xhci_queue_bulk_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 	 * until we've finished creating all the other TRBs.  The ring's cycle
 	 * state may change as we enqueue the other TRBs, so save it too.
 	 */
-	start_trb = &ep_ring->enqueue->generic;
+	start_trb = xhci_ring_enqueue(ep_ring);
 	start_cycle = ep_ring->cycle_state;
 
 	running_total = 0;
@@ -3458,7 +3464,7 @@ int xhci_queue_bulk_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 			field |= TRB_CHAIN;
 		} else {
 			/* FIXME - add check for ZERO_PACKET flag before this */
-			td->last_trb = ep_ring->enqueue;
+			td->last_trb = xhci_ring_enqueue(ep_ring);
 			field |= TRB_IOC;
 		}
 
@@ -3511,7 +3517,7 @@ int xhci_queue_ctrl_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 	int num_trbs;
 	int ret;
 	struct usb_ctrlrequest *setup;
-	struct xhci_generic_trb *start_trb;
+	union xhci_trb *start_trb;
 	int start_cycle;
 	u32 field, length_field;
 	struct urb_priv *urb_priv;
@@ -3551,7 +3557,7 @@ int xhci_queue_ctrl_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 	 * until we've finished creating all the other TRBs.  The ring's cycle
 	 * state may change as we enqueue the other TRBs, so save it too.
 	 */
-	start_trb = &ep_ring->enqueue->generic;
+	start_trb = xhci_ring_enqueue(ep_ring);
 	start_cycle = ep_ring->cycle_state;
 
 	/* Queue setup TRB - see section 6.4.1.2.1 */
@@ -3599,7 +3605,7 @@ int xhci_queue_ctrl_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 	}
 
 	/* Save the DMA address of the last TRB in the TD */
-	td->last_trb = ep_ring->enqueue;
+	td->last_trb = xhci_ring_enqueue(ep_ring);
 
 	/* Queue status TRB - see Table 7 and sections 4.11.2.2 and 6.4.1.2.3 */
 	/* If the device sent data, the status stage is an OUT transfer */
@@ -3699,7 +3705,7 @@ static int xhci_queue_isoc_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 	struct urb_priv *urb_priv;
 	struct xhci_td *td;
 	int num_tds, trbs_per_td;
-	struct xhci_generic_trb *start_trb;
+	union xhci_trb *start_trb;
 	bool first_trb;
 	int start_cycle;
 	u32 field, length_field;
@@ -3717,7 +3723,7 @@ static int xhci_queue_isoc_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 	}
 
 	start_addr = (u64) urb->transfer_dma;
-	start_trb = &ep_ring->enqueue->generic;
+	start_trb = xhci_ring_enqueue(ep_ring);
 	start_cycle = ep_ring->cycle_state;
 
 	urb_priv = urb->hcpriv;
@@ -3789,7 +3795,7 @@ static int xhci_queue_isoc_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 				field |= TRB_CHAIN;
 				more_trbs_coming = true;
 			} else {
-				td->last_trb = ep_ring->enqueue;
+				td->last_trb = xhci_ring_enqueue(ep_ring);
 				field |= TRB_IOC;
 				if (xhci->hci_version == 0x100 &&
 						!(xhci->quirks &
@@ -3859,12 +3865,12 @@ cleanup:
 	 * won't accidentally start executing bogus TDs when we partially
 	 * overwrite them.  td->first_trb and td->start_seg are already set.
 	 */
-	urb_priv->td[0]->last_trb = ep_ring->enqueue;
+	urb_priv->td[0]->last_trb = xhci_ring_enqueue(ep_ring);
 	/* Every TRB except the first & last will have its cycle bit flipped. */
 	td_to_noop(xhci, ep_ring, urb_priv->td[0], true);
 
 	/* Reset the ring enqueue back to the first TRB and its cycle bit. */
-	ep_ring->enqueue = urb_priv->td[0]->first_trb;
+	xhci_ring_set_enqueue(ep_ring, urb_priv->td[0]->first_trb);
 	ep_ring->enq_seg = urb_priv->td[0]->start_seg;
 	ep_ring->cycle_state = start_cycle;
 	ep_ring->num_trbs_free = ep_ring->num_trbs_free_temp;
@@ -3973,7 +3979,7 @@ static int queue_command(struct xhci_hcd *xhci, struct xhci_command *cmd,
 		return ret;
 	}
 
-	cmd->command_trb = xhci->cmd_ring->enqueue;
+	cmd->command_trb = xhci_ring_enqueue(xhci->cmd_ring);
 	list_add_tail(&cmd->cmd_list, &xhci->cmd_list);
 
 	/* if there are no other commands queued we start the timeout timer */
