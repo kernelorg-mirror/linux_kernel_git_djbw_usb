@@ -1348,7 +1348,7 @@ struct xhci_ring {
 	 */
 	u32			cycle_state;
 	unsigned int		stream_id;
-	unsigned int		num_segs;
+	unsigned int		order;
 	unsigned int		num_trbs_free;
 	unsigned int		num_trbs_free_temp;
 	bool			last_td_was_short;
@@ -1357,6 +1357,11 @@ struct xhci_ring {
 	struct radix_tree_root	*trb_address_map;
 	const struct xhci_ring_ops *ops;
 };
+
+static inline unsigned int xhci_ring_num_segs(struct xhci_ring *ring)
+{
+	return 1 << ring->order;
+}
 
 static inline union xhci_trb *xhci_ring_enqueue(struct xhci_ring *ring)
 {
@@ -1457,6 +1462,7 @@ struct urb_priv {
  * (1K bytes * 8bytes/bit) / (4*32 bits) = 64 segment entries in the table,
  * meaning 64 ring segments.
  * Initial allocated size of the ERST, in number of entries */
+#define	ERST_ORDER	0
 #define	ERST_NUM_SEGS	1
 /* Initial allocated size of the ERST, in number of entries */
 #define	ERST_SIZE	64
