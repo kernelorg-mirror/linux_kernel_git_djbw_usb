@@ -1534,13 +1534,12 @@ int xhci_urb_dequeue(struct usb_hcd *hcd, struct urb *urb, int status)
 	if (i < urb_priv->length) {
 		struct xhci_ring_pointer td_rp = { urb_priv->td[i]->start_seg,
 			urb_priv->td[i]->first_trb };
+		dma_addr_t dma = xhci_trb_virt_to_dma(&td_rp);
 
 		xhci_dbg_trace(xhci, trace_xhci_dbg_cancel_urb,
-				"Cancel URB %p, dev %s, ep 0x%x, "
-				"starting at offset 0x%llx",
+				"Cancel URB %p, dev %s, ep 0x%x, dma %pad",
 				urb, urb->dev->devpath,
-				urb->ep->desc.bEndpointAddress,
-				(unsigned long long) xhci_trb_virt_to_dma(&td_rp));
+				urb->ep->desc.bEndpointAddress, &dma);
 	}
 
 	for (; i < urb_priv->length; i++) {
@@ -3767,6 +3766,7 @@ static int xhci_setup_device(struct usb_hcd *hcd, struct usb_device *udev,
 	struct xhci_input_control_ctx *ctrl_ctx;
 	u64 temp_64;
 	struct xhci_command *command;
+	dma_addr_t dma;
 
 	if (!udev->slot_id) {
 		xhci_dbg_trace(xhci, trace_xhci_dbg_address,
@@ -3882,15 +3882,14 @@ static int xhci_setup_device(struct usb_hcd *hcd, struct usb_device *udev,
 	temp_64 = xhci_read_64(xhci, &xhci->op_regs->dcbaa_ptr);
 	xhci_dbg_trace(xhci, trace_xhci_dbg_address,
 			"Op regs DCBAA ptr = %#016llx", temp_64);
+	dma = le64_to_cpu(xhci->dcbaa->dev_context_ptrs[udev->slot_id]);
 	xhci_dbg_trace(xhci, trace_xhci_dbg_address,
-		"Slot ID %d dcbaa entry @%p = %#016llx",
+		"Slot ID %d dcbaa entry @%p = %pad",
 		udev->slot_id,
-		&xhci->dcbaa->dev_context_ptrs[udev->slot_id],
-		(unsigned long long)
-		le64_to_cpu(xhci->dcbaa->dev_context_ptrs[udev->slot_id]));
+		&xhci->dcbaa->dev_context_ptrs[udev->slot_id], &dma);
 	xhci_dbg_trace(xhci, trace_xhci_dbg_address,
-			"Output Context DMA address = %#08llx",
-			(unsigned long long)virt_dev->out_ctx->dma);
+			"Output Context DMA address = %pad",
+			&virt_dev->out_ctx->dma);
 	xhci_dbg(xhci, "Slot ID %d Input Context:\n", udev->slot_id);
 	xhci_dbg_ctx(xhci, virt_dev->in_ctx, 2);
 	trace_xhci_address_ctx(xhci, virt_dev->in_ctx,

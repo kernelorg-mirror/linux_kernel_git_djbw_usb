@@ -674,8 +674,7 @@ void xhci_find_new_dequeue_state(struct xhci_hcd *xhci,
 			state->new_deq.seg);
 	addr = xhci_trb_virt_to_dma(&state->new_deq);
 	xhci_dbg_trace(xhci, trace_xhci_dbg_cancel_urb,
-			"New dequeue pointer = 0x%llx (DMA)",
-			(unsigned long long) addr);
+			"New dequeue pointer = %pad (DMA)", &addr);
 }
 
 /* flip_cycle means flip the cycle bit of all but the first and last TRB.
@@ -689,6 +688,7 @@ static void td_to_noop(struct xhci_hcd *xhci, struct xhci_ring *ep_ring,
 		cur_td->first_trb };
 
 	for (; true; next_trb(ep_ring, &cur_rp)) {
+		dma_addr_t dma = xhci_trb_virt_to_dma(&cur_rp);
 		union xhci_trb *cur_trb = cur_rp.ptr;
 
 		if (TRB_TYPE_LINK_LE32(cur_trb->generic.field[3])) {
@@ -705,12 +705,9 @@ static void td_to_noop(struct xhci_hcd *xhci, struct xhci_ring *ep_ring,
 			xhci_dbg_trace(xhci, trace_xhci_dbg_cancel_urb,
 					"Cancel (unchain) link TRB");
 			xhci_dbg_trace(xhci, trace_xhci_dbg_cancel_urb,
-					"Address = %p (0x%llx dma); "
-					"in seg %p (0x%llx dma)",
-					cur_trb,
-					(unsigned long long)xhci_trb_virt_to_dma(&cur_rp),
-					cur_rp.seg,
-					(unsigned long long)cur_rp.seg->dma);
+					"Address = %p (%pad dma); in seg %p (%pad dma)",
+					cur_trb, &dma, cur_rp.seg,
+					&cur_rp.seg->dma);
 		} else {
 			cur_trb->generic.field[0] = 0;
 			cur_trb->generic.field[1] = 0;
@@ -725,9 +722,7 @@ static void td_to_noop(struct xhci_hcd *xhci, struct xhci_ring *ep_ring,
 			cur_trb->generic.field[3] |= cpu_to_le32(
 				TRB_TYPE(TRB_TR_NOOP));
 			xhci_dbg_trace(xhci, trace_xhci_dbg_cancel_urb,
-					"TRB to noop at offset 0x%llx",
-					(unsigned long long)
-					xhci_trb_virt_to_dma(&cur_rp));
+					"TRB to noop at offset %pad", &dma);
 		}
 		if (cur_trb == cur_td->last_trb)
 			break;
@@ -746,14 +741,15 @@ void xhci_queue_new_dequeue_state(struct xhci_hcd *xhci,
 		struct xhci_dequeue_state *deq_state)
 {
 	struct xhci_virt_ep *ep = &xhci->devs[slot_id]->eps[ep_index];
+	dma_addr_t dma = xhci_trb_virt_to_dma(&deq_state->new_deq);
 
 	xhci_dbg_trace(xhci, trace_xhci_dbg_cancel_urb,
-			"Set TR Deq Ptr cmd, new deq seg = %p (0x%llx dma), "
-			"new deq ptr = %p (0x%llx dma), new cycle = %u",
+			"Set TR Deq Ptr cmd, new deq seg = %p (%pad dma)",
 			deq_state->new_deq.seg,
-			(unsigned long long)deq_state->new_deq.seg->dma,
-			deq_state->new_deq.ptr,
-			(unsigned long long)xhci_trb_virt_to_dma(&deq_state->new_deq),
+			&deq_state->new_deq.seg->dma);
+	xhci_dbg_trace(xhci, trace_xhci_dbg_cancel_urb,
+			"new deq ptr = %p (%pad dma), new cycle = %u",
+			deq_state->new_deq.ptr, &dma,
 			deq_state->new_cycle_state);
 	queue_set_tr_deq(xhci, cmd, slot_id, ep_index, stream_id,
 			&deq_state->new_deq, deq_state->new_cycle_state);
@@ -856,13 +852,15 @@ static void xhci_handle_cmd_stop_ep(struct xhci_hcd *xhci, int slot_id,
 	 */
 	list_for_each(entry, &ep->cancelled_td_list) {
 		struct xhci_ring_pointer td_rp;
+		dma_addr_t dma;
 
 		cur_td = list_entry(entry, struct xhci_td, cancelled_td_list);
 		td_rp.seg = cur_td->start_seg;
 		td_rp.ptr = cur_td->first_trb;
+		dma = xhci_trb_virt_to_dma(&td_rp);
 		xhci_dbg_trace(xhci, trace_xhci_dbg_cancel_urb,
 				"Removing canceled TD starting at 0x%llx (dma).",
-				(unsigned long long)xhci_trb_virt_to_dma(&td_rp));
+				&dma);
 		ep_ring = xhci_urb_to_transfer_ring(xhci, cur_td->urb);
 		if (!ep_ring) {
 			/* This shouldn't happen unless a driver is mucking
@@ -2413,14 +2411,13 @@ static int handle_tx_event(struct xhci_hcd *xhci,
 	u32 trb_comp_code;
 	int ret = 0;
 	int td_num = 0;
+	dma_addr_t dma = xhci_trb_virt_to_dma(&xhci->event_ring->deq);
 
 	slot_id = TRB_TO_SLOT_ID(le32_to_cpu(event->flags));
 	xdev = xhci->devs[slot_id];
 	if (!xdev) {
 		xhci_err(xhci, "ERROR Transfer event pointed to bad slot\n");
-		xhci_err(xhci, "@%016llx %08x %08x %08x %08x\n",
-			 (unsigned long long) xhci_trb_virt_to_dma(
-				 &xhci->event_ring->deq),
+		xhci_err(xhci, "@%pad %08x %08x %08x %08x\n", &dma,
 			 lower_32_bits(le64_to_cpu(event->buffer)),
 			 upper_32_bits(le64_to_cpu(event->buffer)),
 			 le32_to_cpu(event->transfer_len),
@@ -2440,9 +2437,7 @@ static int handle_tx_event(struct xhci_hcd *xhci,
 	    EP_STATE_DISABLED) {
 		xhci_err(xhci, "ERROR Transfer event for disabled endpoint "
 				"or incorrect stream ring\n");
-		xhci_err(xhci, "@%016llx %08x %08x %08x %08x\n",
-			 (unsigned long long) xhci_trb_virt_to_dma(
-				 &xhci->event_ring->deq),
+		xhci_err(xhci, "@%pad %08x %08x %08x %08x\n", &dma,
 			 lower_32_bits(le64_to_cpu(event->buffer)),
 			 upper_32_bits(le64_to_cpu(event->buffer)),
 			 le32_to_cpu(event->transfer_len),

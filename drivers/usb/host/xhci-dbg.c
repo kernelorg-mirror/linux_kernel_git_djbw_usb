@@ -425,10 +425,8 @@ static void dbg_rsvd64(struct xhci_hcd *xhci, u64 *ctx, dma_addr_t dma)
 {
 	int i;
 	for (i = 0; i < 4; ++i) {
-		xhci_dbg(xhci, "@%p (virt) @%08llx "
-			 "(dma) %#08llx - rsvd64[%d]\n",
-			 &ctx[4 + i], (unsigned long long)dma,
-			 ctx[4 + i], i);
+		xhci_dbg(xhci, "@%p (virt) @%pad (dma) %#08llx - rsvd64[%d]\n",
+				&ctx[4 + i], &dma, ctx[4 + i], i);
 		dma += 8;
 	}
 }
@@ -464,25 +462,21 @@ static void xhci_dbg_slot_ctx(struct xhci_hcd *xhci, struct xhci_container_ctx *
 	int csz = HCC_64BYTE_CONTEXT(xhci->hcc_params);
 
 	xhci_dbg(xhci, "Slot Context:\n");
-	xhci_dbg(xhci, "@%p (virt) @%08llx (dma) %#08x - dev_info\n",
-			&slot_ctx->dev_info,
-			(unsigned long long)dma, slot_ctx->dev_info);
+	xhci_dbg(xhci, "@%p (virt) @%pad (dma) %#08x - dev_info\n",
+			&slot_ctx->dev_info, &dma, slot_ctx->dev_info);
 	dma += field_size;
-	xhci_dbg(xhci, "@%p (virt) @%08llx (dma) %#08x - dev_info2\n",
-			&slot_ctx->dev_info2,
-			(unsigned long long)dma, slot_ctx->dev_info2);
+	xhci_dbg(xhci, "@%p (virt) @%pad (dma) %#08x - dev_info2\n",
+			&slot_ctx->dev_info2, &dma, slot_ctx->dev_info2);
 	dma += field_size;
-	xhci_dbg(xhci, "@%p (virt) @%08llx (dma) %#08x - tt_info\n",
-			&slot_ctx->tt_info,
-			(unsigned long long)dma, slot_ctx->tt_info);
+	xhci_dbg(xhci, "@%p (virt) @%pad (dma) %#08x - tt_info\n",
+			&slot_ctx->tt_info, &dma, slot_ctx->tt_info);
 	dma += field_size;
-	xhci_dbg(xhci, "@%p (virt) @%08llx (dma) %#08x - dev_state\n",
-			&slot_ctx->dev_state,
-			(unsigned long long)dma, slot_ctx->dev_state);
+	xhci_dbg(xhci, "@%p (virt) @%pad (dma) %#08x - dev_state\n",
+			&slot_ctx->dev_state, &dma, slot_ctx->dev_state);
 	dma += field_size;
 	for (i = 0; i < 4; ++i) {
-		xhci_dbg(xhci, "@%p (virt) @%08llx (dma) %#08x - rsvd[%d]\n",
-				&slot_ctx->reserved[i], (unsigned long long)dma,
+		xhci_dbg(xhci, "@%p (virt) @%pad (dma) %#08x - rsvd[%d]\n",
+				&slot_ctx->reserved[i], &dma,
 				slot_ctx->reserved[i], i);
 		dma += field_size;
 	}
@@ -512,26 +506,21 @@ static void xhci_dbg_ep_ctx(struct xhci_hcd *xhci,
 		xhci_dbg(xhci, "%s Endpoint %02d Context (ep_index %02d):\n",
 				usb_endpoint_out(epaddr) ? "OUT" : "IN",
 				epaddr & USB_ENDPOINT_NUMBER_MASK, i);
-		xhci_dbg(xhci, "@%p (virt) @%08llx (dma) %#08x - ep_info\n",
-				&ep_ctx->ep_info,
-				(unsigned long long)dma, ep_ctx->ep_info);
+		xhci_dbg(xhci, "@%p (virt) @%pad (dma) %#08x - ep_info\n",
+				&ep_ctx->ep_info, &dma, ep_ctx->ep_info);
 		dma += field_size;
-		xhci_dbg(xhci, "@%p (virt) @%08llx (dma) %#08x - ep_info2\n",
-				&ep_ctx->ep_info2,
-				(unsigned long long)dma, ep_ctx->ep_info2);
+		xhci_dbg(xhci, "@%p (virt) @%pad (dma) %#08x - ep_info2\n",
+				&ep_ctx->ep_info2, &dma, ep_ctx->ep_info2);
 		dma += field_size;
-		xhci_dbg(xhci, "@%p (virt) @%08llx (dma) %#08llx - deq\n",
-				&ep_ctx->deq,
-				(unsigned long long)dma, ep_ctx->deq);
+		xhci_dbg(xhci, "@%p (virt) @%pad (dma) %#08llx - deq\n",
+				&ep_ctx->deq, &dma, ep_ctx->deq);
 		dma += 2*field_size;
-		xhci_dbg(xhci, "@%p (virt) @%08llx (dma) %#08x - tx_info\n",
-				&ep_ctx->tx_info,
-				(unsigned long long)dma, ep_ctx->tx_info);
+		xhci_dbg(xhci, "@%p (virt) @%pad (dma) %#08x - tx_info\n",
+				&ep_ctx->tx_info, &dma, ep_ctx->tx_info);
 		dma += field_size;
 		for (j = 0; j < 3; ++j) {
-			xhci_dbg(xhci, "@%p (virt) @%08llx (dma) %#08x - rsvd[%d]\n",
-					&ep_ctx->reserved[j],
-					(unsigned long long)dma,
+			xhci_dbg(xhci, "@%p (virt) @%pad (dma) %#08x - rsvd[%d]\n",
+					&ep_ctx->reserved[j], &dma,
 					ep_ctx->reserved[j], j);
 			dma += field_size;
 		}
@@ -559,18 +548,15 @@ void xhci_dbg_ctx(struct xhci_hcd *xhci,
 			return;
 		}
 
-		xhci_dbg(xhci, "@%p (virt) @%08llx (dma) %#08x - drop flags\n",
-			 &ctrl_ctx->drop_flags, (unsigned long long)dma,
-			 ctrl_ctx->drop_flags);
+		xhci_dbg(xhci, "@%p (virt) @%pad (dma) %#08x - drop flags\n",
+			 &ctrl_ctx->drop_flags, &dma, ctrl_ctx->drop_flags);
 		dma += field_size;
-		xhci_dbg(xhci, "@%p (virt) @%08llx (dma) %#08x - add flags\n",
-			 &ctrl_ctx->add_flags, (unsigned long long)dma,
-			 ctrl_ctx->add_flags);
+		xhci_dbg(xhci, "@%p (virt) @%pad (dma) %#08x - add flags\n",
+			 &ctrl_ctx->add_flags, &dma, ctrl_ctx->add_flags);
 		dma += field_size;
 		for (i = 0; i < 6; ++i) {
-			xhci_dbg(xhci, "@%p (virt) @%08llx (dma) %#08x - rsvd2[%d]\n",
-				 &ctrl_ctx->rsvd2[i], (unsigned long long)dma,
-				 ctrl_ctx->rsvd2[i], i);
+			xhci_dbg(xhci, "@%p (virt) @%pad (dma) %#08x - rsvd2[%d]\n",
+				 &ctrl_ctx->rsvd2[i], &dma, ctrl_ctx->rsvd2[i], i);
 			dma += field_size;
 		}
 
