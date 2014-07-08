@@ -3672,6 +3672,7 @@ static int xhci_queue_isoc_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 	struct xhci_ring_pointer rp;
 	u64 start_addr, addr;
 	int i, j;
+	unsigned int num_trbs_free_save;
 	bool more_trbs_coming;
 
 	ep_ring = xhci->devs[slot_id]->eps[ep_index].ring;
@@ -3687,6 +3688,7 @@ static int xhci_queue_isoc_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 	start_cycle = ep_ring->cycle_state;
 
 	urb_priv = urb->hcpriv;
+	num_trbs_free_save = ep_ring->num_trbs_free;
 	/* Queue the first TRB, even if it's zero-length */
 	for (i = 0; i < num_tds; i++) {
 		unsigned int total_packet_count;
@@ -3834,7 +3836,7 @@ cleanup:
 	rp.ptr = urb_priv->td[0]->first_trb;
 	xhci_ring_set_enqueue(ep_ring, &rp);
 	ep_ring->cycle_state = start_cycle;
-	ep_ring->num_trbs_free = ep_ring->num_trbs_free_temp;
+	ep_ring->num_trbs_free = num_trbs_free_save;
 	usb_hcd_unlink_urb_from_ep(bus_to_hcd(urb->dev->bus), urb);
 	return ret;
 }
@@ -3903,8 +3905,6 @@ int xhci_queue_isoc_tx_prepare(struct xhci_hcd *xhci, gfp_t mem_flags,
 				urb->dev->speed == USB_SPEED_FULL)
 			urb->interval /= 8;
 	}
-	ep_ring->num_trbs_free_temp = ep_ring->num_trbs_free;
-
 	return xhci_queue_isoc_tx(xhci, mem_flags, urb, slot_id, ep_index);
 }
 

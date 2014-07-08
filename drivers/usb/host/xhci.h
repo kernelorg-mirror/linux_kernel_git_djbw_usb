@@ -1350,7 +1350,6 @@ struct xhci_ring {
 	unsigned int		stream_id;
 	unsigned int		order;
 	unsigned int		num_trbs_free;
-	unsigned int		num_trbs_free_temp;
 	bool			last_td_was_short;
 	bool			is_command;
 	bool			is_stream;
