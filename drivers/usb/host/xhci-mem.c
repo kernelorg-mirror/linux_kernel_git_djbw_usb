@@ -107,7 +107,7 @@ static void xhci_link_rings(struct xhci_hcd *xhci, struct xhci_ring *ring,
 
 	new_tail = list_last_entry(segments, typeof(*new_tail), list);
 	new_head = list_first_entry(segments, typeof(*new_head), list);
-	insert_head = ring->enq_seg;
+	insert_head = ring->enq.seg;
 	insert_next = xhci_segment_next(ring, insert_head);
 
 	/* link them physically */
@@ -259,12 +259,12 @@ static void xhci_initialize_ring_info(struct xhci_ring *ring,
 					unsigned int cycle_state)
 {
 	struct xhci_segment *first_seg = xhci_ring_first_seg(ring);
+	struct xhci_ring_pointer enq = { first_seg, first_seg->trbs };
 
 	/* The ring is empty, so the enqueue pointer == dequeue pointer */
-	xhci_ring_set_enqueue(ring, first_seg->trbs);
-	ring->enq_seg = first_seg;
-	xhci_ring_set_dequeue(ring, xhci_ring_enqueue(ring));
-	ring->deq_seg = first_seg;
+	xhci_ring_set_enqueue(ring, &enq);
+	xhci_ring_set_dequeue(ring, &enq);
+
 	/* The ring is initialized to 0. The producer must write 1 to the cycle
 	 * bit to handover ownership of the TRB, so PCS = 1.  The consumer must
 	 * compare CCS to the cycle bit to check ownership, so CCS = 1.
@@ -753,7 +753,7 @@ void xhci_setup_no_streams_ep_input_ctx(struct xhci_hcd *xhci,
 	dma_addr_t addr;
 
 	ep_ctx->ep_info &= cpu_to_le32(~(EP_MAXPSTREAMS_MASK | EP_HAS_LSA));
-	addr = xhci_trb_virt_to_dma(ring->deq_seg, xhci_ring_dequeue(ring));
+	addr = xhci_trb_virt_to_dma(&ring->deq);
 	ep_ctx->deq  = cpu_to_le64(addr | ep->ring->cycle_state);
 }
 
@@ -1015,8 +1015,7 @@ void xhci_copy_ep0_dequeue_into_input_ctx(struct xhci_hcd *xhci,
 	 * configured device has reset, so all control transfers should have
 	 * been completed or cancelled before the reset.
 	 */
-	ep0_ctx->deq = cpu_to_le64(xhci_trb_virt_to_dma(ep_ring->enq_seg,
-				xhci_ring_enqueue(ep_ring))
+	ep0_ctx->deq = cpu_to_le64(xhci_trb_virt_to_dma(&ep_ring->enq)
 			| ep_ring->cycle_state);
 }
 
@@ -1859,11 +1858,13 @@ static int xhci_test_trb_in_td(struct xhci_hcd *xhci,
 	unsigned long long start_dma;
 	unsigned long long end_dma;
 	struct xhci_segment *seg;
+	struct xhci_ring_pointer start_rp = { input_seg, start_trb };
+	struct xhci_ring_pointer end_rp = { input_seg, end_trb };
 
-	start_dma = xhci_trb_virt_to_dma(input_seg, start_trb);
-	end_dma = xhci_trb_virt_to_dma(input_seg, end_trb);
+	start_dma = xhci_trb_virt_to_dma(&start_rp);
+	end_dma = xhci_trb_virt_to_dma(&end_rp);
 
-	seg = trb_in_td(input_ring, input_seg, start_trb, end_trb, input_dma);
+	seg = trb_in_td(input_ring, &start_rp, end_trb, input_dma);
 	if (seg != result_seg) {
 		xhci_warn(xhci, "WARN: %s TRB math test %d failed!\n",
 				test_name, test_number);
@@ -2021,8 +2022,7 @@ static void xhci_set_hc_event_deq(struct xhci_hcd *xhci)
 	u64 temp;
 	dma_addr_t deq;
 
-	deq = xhci_trb_virt_to_dma(xhci->event_ring->deq_seg,
-			xhci_ring_dequeue(xhci->event_ring));
+	deq = xhci_trb_virt_to_dma(&xhci->event_ring->deq);
 	if (deq == 0 && !in_interrupt())
 		xhci_warn(xhci, "WARN something wrong with SW event ring "
 				"dequeue ptr.\n");

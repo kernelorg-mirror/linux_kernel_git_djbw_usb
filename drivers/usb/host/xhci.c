@@ -792,11 +792,9 @@ static void xhci_set_cmd_ring_deq(struct xhci_hcd *xhci)
 
 	/* step 2: initialize command ring buffer */
 	val_64 = xhci_read_64(xhci, &xhci->op_regs->cmd_ring);
-	val_64 = (val_64 & (u64) CMD_RING_RSVD_BITS) |
-		(xhci_trb_virt_to_dma(xhci->cmd_ring->deq_seg,
-				      xhci_ring_dequeue(xhci->cmd_ring)) &
-		 (u64) ~CMD_RING_RSVD_BITS) |
-		xhci->cmd_ring->cycle_state;
+	val_64 = (val_64 & (u64) CMD_RING_RSVD_BITS)
+		| (xhci_trb_virt_to_dma(&xhci->cmd_ring->deq)
+		 & (u64) ~CMD_RING_RSVD_BITS) | xhci->cmd_ring->cycle_state;
 	xhci_dbg_trace(xhci, trace_xhci_dbg_init,
 			"// Setting command ring address to 0x%llx",
 			(long unsigned long) val_64);
@@ -816,6 +814,7 @@ static void xhci_clear_command_ring(struct xhci_hcd *xhci)
 {
 	struct xhci_ring *ring = xhci->cmd_ring;
 	struct xhci_segment *first_seg = xhci_ring_first_seg(ring), *seg;
+	struct xhci_ring_pointer enq = { first_seg, first_seg->trbs };
 
 	list_for_each_entry(seg, &ring->segments, list) {
 		/* clear all but the link-trb */
@@ -829,10 +828,8 @@ static void xhci_clear_command_ring(struct xhci_hcd *xhci)
 	}
 
 	/* Reset the software enqueue and dequeue pointers */
-	ring->deq_seg = first_seg;
-	xhci_ring_set_dequeue(ring, first_seg->trbs);
-	ring->enq_seg = ring->deq_seg;
-	xhci_ring_set_enqueue(ring, xhci_ring_dequeue(ring));
+	xhci_ring_set_enqueue(ring, &enq);
+	xhci_ring_set_dequeue(ring, &enq);
 
 	ring->num_trbs_free = ring->num_segs * (TRBS_PER_SEGMENT - 1) - 1;
 	/*
@@ -1534,15 +1531,17 @@ int xhci_urb_dequeue(struct usb_hcd *hcd, struct urb *urb, int status)
 
 	urb_priv = urb->hcpriv;
 	i = urb_priv->td_cnt;
-	if (i < urb_priv->length)
+	if (i < urb_priv->length) {
+		struct xhci_ring_pointer td_rp = { urb_priv->td[i]->start_seg,
+			urb_priv->td[i]->first_trb };
+
 		xhci_dbg_trace(xhci, trace_xhci_dbg_cancel_urb,
 				"Cancel URB %p, dev %s, ep 0x%x, "
 				"starting at offset 0x%llx",
 				urb, urb->dev->devpath,
 				urb->ep->desc.bEndpointAddress,
-				(unsigned long long) xhci_trb_virt_to_dma(
-					urb_priv->td[i]->start_seg,
-					urb_priv->td[i]->first_trb));
+				(unsigned long long) xhci_trb_virt_to_dma(&td_rp));
+	}
 
 	for (; i < urb_priv->length; i++) {
 		td = urb_priv->td[i];
@@ -2843,14 +2842,13 @@ static void xhci_setup_input_ctx_for_quirk(struct xhci_hcd *xhci,
 	xhci_endpoint_copy(xhci, xhci->devs[slot_id]->in_ctx,
 			xhci->devs[slot_id]->out_ctx, ep_index);
 	ep_ctx = xhci_get_ep_ctx(xhci, in_ctx, ep_index);
-	addr = xhci_trb_virt_to_dma(deq_state->new_deq_seg,
-			deq_state->new_deq_ptr);
+	addr = xhci_trb_virt_to_dma(&deq_state->new_deq);
 	if (addr == 0) {
 		xhci_warn(xhci, "WARN Cannot submit config ep after "
 				"reset ep command\n");
 		xhci_warn(xhci, "WARN deq seg = %p, deq ptr = %p\n",
-				deq_state->new_deq_seg,
-				deq_state->new_deq_ptr);
+				deq_state->new_deq.seg,
+				deq_state->new_deq.ptr);
 		return;
 	}
 	ep_ctx->deq = cpu_to_le64(addr | deq_state->new_cycle_state);

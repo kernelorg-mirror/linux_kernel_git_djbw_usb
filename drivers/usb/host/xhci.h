@@ -847,6 +847,11 @@ struct xhci_bw_info {
 #define HS_BW_RESERVED		20
 #define SS_BW_RESERVED		10
 
+struct xhci_ring_pointer {
+	struct xhci_segment *seg;
+	union xhci_trb *ptr;
+};
+
 struct xhci_virt_ep {
 	struct xhci_ring		*ring;
 	/* Related to endpoints that are configured to use stream IDs only */
@@ -876,8 +881,7 @@ struct xhci_virt_ep {
 	 * command.  We'll need to update the ring's dequeue segment and dequeue
 	 * pointer after the command completes.
 	 */
-	struct xhci_segment	*queued_deq_seg;
-	union xhci_trb		*queued_deq_ptr;
+	struct xhci_ring_pointer queued_deq;
 	/*
 	 * Sometimes the xHC can not process isochronous endpoint ring quickly
 	 * enough, and it will miss some isoc tds on the ring and generate
@@ -1306,8 +1310,7 @@ struct xhci_cd {
 };
 
 struct xhci_dequeue_state {
-	struct xhci_segment *new_deq_seg;
-	union xhci_trb *new_deq_ptr;
+	struct xhci_ring_pointer new_deq;
 	int new_cycle_state;
 };
 
@@ -1322,10 +1325,9 @@ enum xhci_ring_type {
 };
 
 struct xhci_ring_ops {
-	bool (*last_trb)(struct xhci_ring *ring, struct xhci_segment *seg,
-			union xhci_trb *trb);
-	bool (*last_trb_ring)(struct xhci_ring *ring, struct xhci_segment *seg,
-			union xhci_trb *trb);
+	bool (*last_trb)(struct xhci_ring *ring, struct xhci_ring_pointer *rp);
+	bool (*last_trb_ring)(struct xhci_ring *ring,
+			struct xhci_ring_pointer *rp);
 	void (*inc_enq)(struct xhci_ring *ring, bool more_trbs_coming);
 	void (*inc_deq)(struct xhci_ring *ring);
 	void (*link_segments)(struct xhci_segment *prev,
@@ -1333,12 +1335,10 @@ struct xhci_ring_ops {
 };
 
 struct xhci_ring {
+	struct xhci_ring_pointer enq;
+	struct xhci_ring_pointer deq;
 	struct list_head	segments;
-	union  xhci_trb		*enq;
-	struct xhci_segment	*enq_seg;
 	unsigned int		enq_updates;
-	union  xhci_trb		*deq;
-	struct xhci_segment	*deq_seg;
 	unsigned int		deq_updates;
 	struct list_head	td_list;
 	/*
@@ -1360,26 +1360,27 @@ struct xhci_ring {
 
 static inline union xhci_trb *xhci_ring_enqueue(struct xhci_ring *ring)
 {
-	return ring->enq;
+	return ring->enq.ptr;
 }
 
 static inline union xhci_trb *xhci_ring_dequeue(struct xhci_ring *ring)
 {
-	return ring->deq;
+	return ring->deq.ptr;
 }
 
 static inline void xhci_ring_set_enqueue(struct xhci_ring *ring,
-	union xhci_trb *enqueue)
+	struct xhci_ring_pointer *rp)
 {
-	ring->enq = enqueue;
+	ring->enq.ptr = rp->ptr;
+	ring->enq.seg = rp->seg ? rp->seg : ring->enq.seg;
 }
 
 static inline void xhci_ring_set_dequeue(struct xhci_ring *ring,
-	union xhci_trb *dequeue)
+	struct xhci_ring_pointer *rp)
 {
-	ring->deq = dequeue;
+	ring->deq.ptr = rp->ptr;
+	ring->deq.seg = rp->seg ? rp->seg : ring->deq.seg;
 }
-
 
 static inline void xhci_ring_inc_deq(struct xhci_ring *ring)
 {
@@ -1403,6 +1404,18 @@ static inline struct xhci_segment *xhci_segment_next(struct xhci_ring *ring,
 		return xhci_ring_first_seg(ring);
 	else
 		return list_next_entry(seg, list);
+}
+
+static inline void xhci_ring_pointer_advance_seg(struct xhci_ring *ring,
+	struct xhci_ring_pointer *rp)
+{
+	rp->seg = xhci_segment_next(ring, rp->seg);
+	rp->ptr = rp->seg->trbs;
+}
+
+static inline void xhci_ring_pointer_advance(struct xhci_ring_pointer *rp)
+{
+	rp->ptr++;
 }
 
 void xhci_ring_init_type(struct xhci_hcd *xhci, struct xhci_ring *ring,
@@ -1874,9 +1887,9 @@ int xhci_check_bandwidth(struct usb_hcd *hcd, struct usb_device *udev);
 void xhci_reset_bandwidth(struct usb_hcd *hcd, struct usb_device *udev);
 
 /* xHCI ring, segment, TRB, and TD functions */
-dma_addr_t xhci_trb_virt_to_dma(struct xhci_segment *seg, union xhci_trb *trb);
+dma_addr_t xhci_trb_virt_to_dma(struct xhci_ring_pointer *rp);
 struct xhci_segment *trb_in_td(struct xhci_ring *ring,
-		struct xhci_segment *start_seg, union xhci_trb *start_trb,
+		struct xhci_ring_pointer *start_rp,
 		union xhci_trb *end_trb, dma_addr_t suspect_dma);
 int xhci_is_vendor_info_code(struct xhci_hcd *xhci, unsigned int trb_comp_code);
 void xhci_ring_cmd_db(struct xhci_hcd *xhci);

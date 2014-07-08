@@ -330,12 +330,12 @@ void xhci_dbg_ring_ptrs(struct xhci_hcd *xhci, struct xhci_ring *ring)
 {
 	dma_addr_t dma;
 
-	dma = xhci_trb_virt_to_dma(ring->deq_seg, xhci_ring_dequeue(ring));
+	dma = xhci_trb_virt_to_dma(&ring->deq);
 	xhci_dbg(xhci, "Ring deq = %p (virt), %pad (dma)\n",
 			xhci_ring_dequeue(ring), &dma);
 	xhci_dbg(xhci, "Ring deq updated %u times\n",
 			ring->deq_updates);
-	dma = xhci_trb_virt_to_dma(ring->enq_seg, xhci_ring_enqueue(ring));
+	dma = xhci_trb_virt_to_dma(&ring->enq);
 	xhci_dbg(xhci, "Ring enq = %p (virt), %pad (dma)\n",
 			xhci_ring_enqueue(ring), &dma);
 	xhci_dbg(xhci, "Ring enq updated %u times\n",
@@ -379,7 +379,7 @@ void xhci_dbg_ep_rings(struct xhci_hcd *xhci,
 			ring = ep->stream_info->stream_rings[i];
 			xhci_dbg(xhci, "Dev %d endpoint %d stream ID %d:\n",
 				slot_id, ep_index, i);
-			xhci_debug_segment(xhci, ring->deq_seg);
+			xhci_debug_segment(xhci, ring->deq.seg);
 		}
 	} else {
 		ring = ep->ring;
@@ -387,7 +387,7 @@ void xhci_dbg_ep_rings(struct xhci_hcd *xhci,
 			return;
 		xhci_dbg(xhci, "Dev %d endpoint ring %d:\n",
 				slot_id, ep_index);
-		xhci_debug_segment(xhci, ring->deq_seg);
+		xhci_debug_segment(xhci, ring->deq.seg);
 	}
 }
 
