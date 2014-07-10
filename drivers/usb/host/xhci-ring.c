@@ -2920,9 +2920,68 @@ static void queue_trb(struct xhci_ring *ring, bool more_trbs_coming,
  * FIXME allocate segments if the ring is full.
  */
 static int prepare_ring(struct xhci_hcd *xhci, struct xhci_ring *ep_ring,
-		u32 ep_state, unsigned int num_trbs, gfp_t mem_flags)
+		unsigned int num_trbs, gfp_t mem_flags)
 {
 	unsigned int num_trbs_needed;
+
+	while (1) {
+		if (room_on_ring(xhci, ep_ring, num_trbs))
+			break;
+
+		if (ep_ring == xhci->cmd_ring) {
+			xhci_err(xhci, "Do not support expand command ring\n");
+			return -ENOMEM;
+		}
+
+		xhci_dbg_trace(xhci, trace_xhci_dbg_ring_expansion,
+				"ERROR no room on ep ring, try ring expansion");
+		num_trbs_needed = num_trbs - ep_ring->num_trbs_free;
+		if (xhci_ring_expansion(xhci, ep_ring, num_trbs_needed,
+					mem_flags)) {
+			xhci_err(xhci, "Ring expansion failed\n");
+			return -ENOMEM;
+		}
+	}
+
+	if (enqueue_is_link_trb(ep_ring))
+		advance_enq(ep_ring, 0, do_carry_chain(xhci, ep_ring));
+	return 0;
+}
+
+static int prepare_td(struct xhci_ring *ring, struct urb *urb,
+		unsigned int td_index)
+{
+	struct urb_priv *urb_priv;
+	struct xhci_td *td;
+
+	urb_priv = urb->hcpriv;
+	td = urb_priv->td[td_index];
+
+	INIT_LIST_HEAD(&td->td_list);
+	INIT_LIST_HEAD(&td->cancelled_td_list);
+
+	if (td_index == 0) {
+		struct usb_hcd *hcd = bus_to_hcd(urb->dev->bus);
+		int ret = usb_hcd_link_urb_to_ep(hcd, urb);
+
+		if (ret)
+			return ret;
+	}
+
+	td->urb = urb;
+	/* Add this TD to the tail of the endpoint ring's TD list */
+	list_add_tail(&td->td_list, &ring->td_list);
+	td->start_seg = ring->enq.seg;
+	td->first_trb = xhci_ring_enqueue(ring);
+	urb_priv->td[td_index] = td;
+
+	return 0;
+}
+
+static int check_ep_submit_state(struct xhci_hcd *xhci,
+		struct xhci_ep_ctx *ep_ctx)
+{
+	u32 ep_state = le32_to_cpu(ep_ctx->ep_info) & EP_STATE_MASK;
 
 	/* Make sure the endpoint has been added to xHC schedule */
 	switch (ep_state) {
@@ -2951,28 +3010,6 @@ static int prepare_ring(struct xhci_hcd *xhci, struct xhci_ring *ep_ring,
 		 */
 		return -EINVAL;
 	}
-
-	while (1) {
-		if (room_on_ring(xhci, ep_ring, num_trbs))
-			break;
-
-		if (ep_ring == xhci->cmd_ring) {
-			xhci_err(xhci, "Do not support expand command ring\n");
-			return -ENOMEM;
-		}
-
-		xhci_dbg_trace(xhci, trace_xhci_dbg_ring_expansion,
-				"ERROR no room on ep ring, try ring expansion");
-		num_trbs_needed = num_trbs - ep_ring->num_trbs_free;
-		if (xhci_ring_expansion(xhci, ep_ring, num_trbs_needed,
-					mem_flags)) {
-			xhci_err(xhci, "Ring expansion failed\n");
-			return -ENOMEM;
-		}
-	}
-
-	if (enqueue_is_link_trb(ep_ring))
-		advance_enq(ep_ring, 0, do_carry_chain(xhci, ep_ring));
 	return 0;
 }
 
@@ -2986,8 +3023,6 @@ static int prepare_transfer(struct xhci_hcd *xhci,
 		gfp_t mem_flags)
 {
 	int ret;
-	struct urb_priv *urb_priv;
-	struct xhci_td	*td;
 	struct xhci_ring *ep_ring;
 	struct xhci_ep_ctx *ep_ctx = xhci_get_ep_ctx(xhci, xdev->out_ctx, ep_index);
 
@@ -2998,33 +3033,15 @@ static int prepare_transfer(struct xhci_hcd *xhci,
 		return -EINVAL;
 	}
 
-	ret = prepare_ring(xhci, ep_ring,
-			   le32_to_cpu(ep_ctx->ep_info) & EP_STATE_MASK,
-			   num_trbs, mem_flags);
+	ret = check_ep_submit_state(xhci, ep_ctx);
 	if (ret)
 		return ret;
 
-	urb_priv = urb->hcpriv;
-	td = urb_priv->td[td_index];
+	ret = prepare_ring(xhci, ep_ring, num_trbs, mem_flags);
+	if (ret)
+		return ret;
 
-	INIT_LIST_HEAD(&td->td_list);
-	INIT_LIST_HEAD(&td->cancelled_td_list);
-
-	if (td_index == 0) {
-		ret = usb_hcd_link_urb_to_ep(bus_to_hcd(urb->dev->bus), urb);
-		if (unlikely(ret))
-			return ret;
-	}
-
-	td->urb = urb;
-	/* Add this TD to the tail of the endpoint ring's TD list */
-	list_add_tail(&td->td_list, &ep_ring->td_list);
-	td->start_seg = ep_ring->enq.seg;
-	td->first_trb = xhci_ring_enqueue(ep_ring);
-
-	urb_priv->td[td_index] = td;
-
-	return 0;
+	return prepare_td(ep_ring, urb, td_index);
 }
 
 static unsigned int count_sg_trbs_needed(struct xhci_hcd *xhci, struct urb *urb)
@@ -3872,8 +3889,10 @@ int xhci_queue_isoc_tx_prepare(struct xhci_hcd *xhci, gfp_t mem_flags,
 	/* Check the ring to guarantee there is enough room for the whole urb.
 	 * Do not insert any td of the urb to the ring if the check failed.
 	 */
-	ret = prepare_ring(xhci, ep_ring, le32_to_cpu(ep_ctx->ep_info) & EP_STATE_MASK,
-			   num_trbs, mem_flags);
+	ret = check_ep_submit_state(xhci, ep_ctx);
+	if (ret)
+		return ret;
+	ret = prepare_ring(xhci, ep_ring, num_trbs, mem_flags);
 	if (ret)
 		return ret;
 
@@ -3930,8 +3949,7 @@ static int queue_command(struct xhci_hcd *xhci, struct xhci_command *cmd,
 	if (!command_must_succeed)
 		reserved_trbs++;
 
-	ret = prepare_ring(xhci, xhci->cmd_ring, EP_STATE_RUNNING,
-			reserved_trbs, GFP_ATOMIC);
+	ret = prepare_ring(xhci, xhci->cmd_ring, reserved_trbs, GFP_ATOMIC);
 	if (ret < 0) {
 		xhci_err(xhci, "ERR: No room for command on command ring\n");
 		if (command_must_succeed)
