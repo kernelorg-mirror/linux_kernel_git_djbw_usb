@@ -1962,6 +1962,13 @@ int xhci_is_vendor_info_code(struct xhci_hcd *xhci, unsigned int trb_comp_code)
 	return 0;
 }
 
+static void xhci_ring_reap_td(struct xhci_ring *ep_ring, struct xhci_td *td)
+{
+	while (xhci_ring_dequeue(ep_ring) != td->last_trb)
+		xhci_ring_inc_deq(ep_ring);
+	xhci_ring_inc_deq(ep_ring);
+}
+
 /*
  * Finish the td processing, remove the td from td list;
  * Return 1 if the urb can be given back.
@@ -2020,10 +2027,7 @@ static int finish_td(struct xhci_hcd *xhci, struct xhci_td *td,
 					slot_id, ep_index, ep_ring->stream_id,
 					td, event_trb);
 		} else {
-			/* Update ring dequeue pointer */
-			while (xhci_ring_dequeue(ep_ring) != td->last_trb)
-				xhci_ring_inc_deq(ep_ring);
-			xhci_ring_inc_deq(ep_ring);
+			xhci_ring_reap_td(ep_ring, td);
 		}
 
 td_cleanup:
@@ -2272,10 +2276,7 @@ static int skip_isoc_td(struct xhci_hcd *xhci, struct xhci_td *td,
 	/* calc actual length */
 	frame->actual_length = 0;
 
-	/* Update ring dequeue pointer */
-	while (xhci_ring_dequeue(ep_ring) != td->last_trb)
-		xhci_ring_inc_deq(ep_ring);
-	xhci_ring_inc_deq(ep_ring);
+	xhci_ring_reap_td(ep_ring, td);
 
 	return finish_td(xhci, td, NULL, event, ep, status, true);
 }
