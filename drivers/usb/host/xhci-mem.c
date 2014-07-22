@@ -526,6 +526,7 @@ struct xhci_slot_ctx *xhci_get_slot_ctx(struct xhci_hcd *xhci,
 		(ctx->bytes + CTX_SIZE(xhci->hcc_params));
 }
 
+#ifndef XHCI_UNIT
 struct xhci_ep_ctx *xhci_get_ep_ctx(struct xhci_hcd *xhci,
 				    struct xhci_container_ctx *ctx,
 				    unsigned int ep_index)
@@ -538,6 +539,7 @@ struct xhci_ep_ctx *xhci_get_ep_ctx(struct xhci_hcd *xhci,
 	return (struct xhci_ep_ctx *)
 		(ctx->bytes + (ep_index * CTX_SIZE(xhci->hcc_params)));
 }
+#endif
 
 
 /***************** Streams structures manipulation *************************/

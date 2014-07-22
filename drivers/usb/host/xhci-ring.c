@@ -536,6 +536,7 @@ static int xhci_abort_cmd_ring(struct xhci_hcd *xhci)
 	return 0;
 }
 
+#ifndef XHCI_UNIT
 void xhci_ring_ep_doorbell(struct xhci_hcd *xhci,
 		unsigned int slot_id,
 		unsigned int ep_index,
@@ -560,6 +561,7 @@ void xhci_ring_ep_doorbell(struct xhci_hcd *xhci,
 	 * write-posting flush.  It'll get there soon enough.
 	 */
 }
+#endif
 
 /* Ring the doorbell for any rings with pending URBs */
 static void ring_doorbell_for_active_rings(struct xhci_hcd *xhci,

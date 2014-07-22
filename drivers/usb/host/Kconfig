@@ -24,6 +24,19 @@ config USB_XHCI_HCD
 	  To compile this driver as a module, choose M here: the
 	  module will be called xhci-hcd.
 
+config USB_XHCI_TEST
+	tristate "xHCI Unit Tests"
+	depends on USB_XHCI_HCD!=y
+	depends on !DEBUG_SG
+	---help---
+	  This module runs sanity checks against the xhci ring
+	  enqueue/dequeue code.
+
+	  It really only makes sense to compile this driver as a module,
+	  and only load it when doing xhci driver development.
+
+	  Choose M to compile this driver as a module named xhci_test.
+
 if USB_XHCI_HCD
 
 config USB_XHCI_PLATFORM
