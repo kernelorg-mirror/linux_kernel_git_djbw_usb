@@ -688,6 +688,7 @@ struct xhci_ep_ctx {
 /* bit 7 is Host Initiate Disable - for disabling stream selection */
 #define MAX_BURST(p)	(((p)&0xff) << 8)
 #define CTX_TO_MAX_BURST(p)	(((p) >> 8) & 0xff)
+#define CTX_TO_MAX_PACKET(p)	(((p) >> 16) & 0xffff)
 #define MAX_PACKET(p)	(((p)&0xffff) << 16)
 #define MAX_PACKET_MASK		(0xffff << 16)
 #define MAX_PACKET_DECODED(p)	(((p) >> 16) & 0xffff)
@@ -1286,6 +1287,7 @@ struct xhci_segment {
 	/* private to HCD */
 	union xhci_trb		*link;
 	struct list_head	list;
+	int			segid;
 	dma_addr_t		dma;
 	struct device		*dev;
 	struct work_struct	work; /* for dma_free_coherent constraints */
@@ -1332,6 +1334,10 @@ struct xhci_ring_ops {
 	void (*inc_deq)(struct xhci_ring *ring);
 	void (*link_segments)(struct xhci_segment *prev,
 			struct xhci_segment *next);
+	int (*queue_bulk_sg_tx)(struct xhci_hcd *xhci, struct xhci_ring *ring,
+		gfp_t mem_flags, struct urb *urb, struct scatterlist *sgl,
+		int num_sgs, int slot_id, unsigned int ep_index);
+	void (*reap_td)(struct xhci_ring *ring);
 };
 
 struct xhci_ring {
@@ -1360,6 +1366,59 @@ struct xhci_ring {
 static inline unsigned int xhci_ring_num_segs(struct xhci_ring *ring)
 {
 	return 1 << ring->order;
+}
+
+static inline unsigned int xhci_ring_size(struct xhci_ring *ring)
+{
+	return xhci_ring_num_segs(ring) * TRBS_PER_SEGMENT;
+}
+
+static inline unsigned int xhci_ring_last_index(struct xhci_ring *ring)
+{
+	return xhci_ring_size(ring) - 1;
+}
+
+static inline unsigned int to_xhci_ring_index(struct xhci_ring *ring,
+		unsigned int index)
+{
+	return index & xhci_ring_last_index(ring);
+}
+
+static inline bool is_last_xhci_segment_index(unsigned int index)
+{
+	return index % TRBS_PER_SEGMENT == TRBS_PER_SEGMENT - 1;
+}
+
+static inline struct xhci_segment *to_xhci_ring_segment(struct xhci_ring *ring,
+	struct xhci_segment *seg, unsigned int idx)
+{
+	unsigned int segid = idx / TRBS_PER_SEGMENT;
+	unsigned int advance;
+
+	advance = (segid - seg->segid) & (xhci_ring_num_segs(ring) - 1);
+	while (advance--) {
+		seg = list_next_entry(seg, list);
+		if (&seg->list == &ring->segments)
+			seg = list_next_entry(seg, list);
+	}
+	WARN_ON_ONCE(seg->segid != segid);
+
+	return seg;
+}
+
+static inline unsigned int xhci_ring_pointer_to_index(
+		struct xhci_ring_pointer *rp)
+{
+	unsigned int offset = rp->ptr - rp->seg->trbs;
+
+	return rp->seg->segid * TRBS_PER_SEGMENT + offset;
+}
+
+static inline union xhci_trb *to_xhci_ring_trb(struct xhci_ring *ring,
+		struct xhci_segment *seg, unsigned int idx)
+{
+	seg = to_xhci_ring_segment(ring, seg, to_xhci_ring_index(ring, idx));
+	return &seg->trbs[idx % TRBS_PER_SEGMENT];
 }
 
 static inline union xhci_trb *xhci_ring_enqueue(struct xhci_ring *ring)
@@ -1408,6 +1467,13 @@ static inline struct xhci_segment *xhci_segment_next(struct xhci_ring *ring,
 		return xhci_ring_first_seg(ring);
 	else
 		return list_next_entry(seg, list);
+}
+
+static inline unsigned int xhci_ring_advance_seg(struct xhci_ring *ring,
+	unsigned int idx)
+{
+	return to_xhci_ring_index(ring, idx + TRBS_PER_SEGMENT
+			- (idx % TRBS_PER_SEGMENT));
 }
 
 static inline void xhci_ring_pointer_advance_seg(struct xhci_ring *ring,
@@ -1975,6 +2041,15 @@ void xhci_ring_device(struct xhci_hcd *xhci, int slot_id);
 struct xhci_input_control_ctx *xhci_get_input_control_ctx(struct xhci_hcd *xhci, struct xhci_container_ctx *ctx);
 struct xhci_slot_ctx *xhci_get_slot_ctx(struct xhci_hcd *xhci, struct xhci_container_ctx *ctx);
 struct xhci_ep_ctx *xhci_get_ep_ctx(struct xhci_hcd *xhci, struct xhci_container_ctx *ctx, unsigned int ep_index);
+
+static inline u32 xhci_get_ep_ctx_mbp(struct xhci_ep_ctx *ctx)
+{
+	u32 ep_info2 = __le32_to_cpu(ctx->ep_info2);
+	u32 max_packet = CTX_TO_MAX_PACKET(ep_info2);
+	u32 max_burst = CTX_TO_MAX_BURST(ep_info2);
+
+	return (max_packet * (max_burst + 1));
+}
 
 /* xHCI quirks */
 bool xhci_compliance_mode_recovery_timer_quirk_check(void);

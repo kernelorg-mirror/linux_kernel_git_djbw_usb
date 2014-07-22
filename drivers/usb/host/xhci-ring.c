@@ -168,6 +168,40 @@ static void ep_inc_deq(struct xhci_ring *ring)
 	} while (ring->ops->last_trb(ring, &ring->deq));
 }
 
+static void v1_inc_deq(struct xhci_ring *ring)
+{
+	ring->deq_updates++;
+
+	if (!ring->ops->last_trb(ring, &ring->deq))
+		ring->num_trbs_free++;
+
+	/*
+	 * ep_inc_deq() lets the dequeue-pointer (deq/tail) wrap the
+	 * enqueue-pointer (enq/head)!  However, since room_on_ring() looks at
+	 * ->num_trbs_free instead of the position of the ring pointers, it
+	 * never causes a problem as enq gets back in line with deq at the next
+	 * submission.
+	 *
+	 * In the case of v1+ rings, conditional_expand() is sensitive to this
+	 * wrap and prematurely expands the ring.  Prevent that condition by
+	 * stopping once deq == enq.  Eventually, ->num_trbs_free should be
+	 * deprecated entirely in favor of just comparing the ring pointers.
+	 * For now, for legacy compatibility, we leave well enough alone and
+	 * limit this to xhci-v1+ implementations.
+	 */
+	do {
+		if (xhci_ring_dequeue(ring) == xhci_ring_enqueue(ring))
+			break;
+
+		/* Update the dequeue pointer further if that was a link TRB */
+		if (ring->ops->last_trb(ring, &ring->deq))
+			xhci_ring_pointer_advance_seg(ring, &ring->deq);
+		else
+			xhci_ring_pointer_advance(&ring->deq);
+	} while (ring->ops->last_trb(ring, &ring->deq));
+
+}
+
 /*
  * Don't make a ring full of link TRBs.  That would be dumb and this
  * would loop.
@@ -289,7 +323,7 @@ static u32 common_link_segments(struct xhci_segment *prev,
 
 	if (!prev || !next)
 		return 0;
-	prev->link = &prev->trbs[TRBS_PER_SEGMENT-1];
+	prev->link = &prev->trbs[TRBS_PER_SEGMENT - 1];
 	prev->link->link.segment_ptr = cpu_to_le64(next->dma);
 
 	/* Set the last TRB in the segment to have a TRB type ID of Link TRB */
@@ -324,6 +358,30 @@ static void chain_quirk_link_segments(struct xhci_segment *prev,
 	prev->link->link.control = cpu_to_le32(val);
 }
 
+static unsigned int xhci_ring_num_trbs_free(struct xhci_ring *ring)
+{
+	unsigned int enq_idx, deq_idx, num_trbs, num_segs;
+
+	enq_idx = xhci_ring_pointer_to_index(&ring->enq);
+	deq_idx = xhci_ring_pointer_to_index(&ring->deq);
+
+	num_trbs = to_xhci_ring_index(ring, deq_idx - (enq_idx + 1));
+	num_segs = (enq_idx % TRBS_PER_SEGMENT + num_trbs) / TRBS_PER_SEGMENT;
+
+	/* free trbs minus link trbs */
+	return num_trbs - num_segs;
+}
+
+static void v1_reap_td(struct xhci_ring *ring)
+{
+	/*
+	 * hack to fix up num_trbs_free for v1 rings where the presence of
+	 * mid-segment links means that increment num_trbs_free once per
+	 * ->inc_deq() invocation is insufficient
+	 */
+	ring->num_trbs_free = xhci_ring_num_trbs_free(ring);
+}
+
 static const struct xhci_ring_ops event_ring_ops = {
 	.last_trb = event_last_trb,
 	.last_trb_ring = event_last_trb_ring,
@@ -332,12 +390,20 @@ static const struct xhci_ring_ops event_ring_ops = {
 	.link_segments = event_link_segments,
 };
 
+static int queue_bulk_sg_tx(struct xhci_hcd *xhci, struct xhci_ring *ring,
+		gfp_t mem_flags, struct urb *urb, struct scatterlist *sgl,
+		int num_sgs, int slot_id, unsigned int ep_index);
+static int queue_bulk_sg_tx_v1(struct xhci_hcd *xhci, struct xhci_ring *ring,
+		gfp_t mem_flags, struct urb *urb, struct scatterlist *sgl,
+		int num_sgs, int slot_id, unsigned int ep_index);
+
 static const struct xhci_ring_ops ep_ring_ops = {
 	.last_trb = ep_last_trb,
 	.last_trb_ring = ep_last_trb_ring,
 	.inc_enq = ep_inc_enq,
 	.inc_deq = ep_inc_deq,
 	.link_segments = ep_link_segments,
+	.queue_bulk_sg_tx = queue_bulk_sg_tx,
 };
 
 static const struct xhci_ring_ops chain_quirk_ring_ops = {
@@ -346,6 +412,17 @@ static const struct xhci_ring_ops chain_quirk_ring_ops = {
 	.inc_enq = chain_quirk_inc_enq,
 	.inc_deq = ep_inc_deq,
 	.link_segments = chain_quirk_link_segments,
+	.queue_bulk_sg_tx = queue_bulk_sg_tx,
+};
+
+static const struct xhci_ring_ops ep_ring_ops_v1 = {
+	.last_trb = ep_last_trb,
+	.last_trb_ring = ep_last_trb_ring,
+	.inc_enq = ep_inc_enq,
+	.inc_deq = v1_inc_deq,
+	.link_segments = ep_link_segments,
+	.queue_bulk_sg_tx = queue_bulk_sg_tx_v1,
+	.reap_td = v1_reap_td,
 };
 
 bool xhci_is_event_ring(struct xhci_ring *ring)
@@ -372,8 +449,10 @@ static const struct xhci_ring_ops *xhci_ring_ops(struct xhci_hcd *xhci,
 	case TYPE_COMMAND:
 		if (chain_quirk)
 			ops = &chain_quirk_ring_ops;
-		else
+		else if (xhci->hci_version < 0x100)
 			ops = &ep_ring_ops;
+		else
+			ops = &ep_ring_ops_v1;
 		break;
 	default:
 		ops = NULL;
@@ -1967,6 +2046,8 @@ static void xhci_ring_reap_td(struct xhci_ring *ep_ring, struct xhci_td *td)
 	while (xhci_ring_dequeue(ep_ring) != td->last_trb)
 		xhci_ring_inc_deq(ep_ring);
 	xhci_ring_inc_deq(ep_ring);
+	if (ep_ring->ops->reap_td)
+		ep_ring->ops->reap_td(ep_ring);
 }
 
 /*
@@ -3196,11 +3277,10 @@ static u32 xhci_v1_0_td_remainder(int running_total, int trb_buff_len,
 	return (total_packet_count - packets_transferred) << 17;
 }
 
-static int queue_bulk_sg_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
-		struct urb *urb, struct scatterlist *sgl, int num_sgs,
-		int slot_id, unsigned int ep_index)
+static int queue_bulk_sg_tx(struct xhci_hcd *xhci, struct xhci_ring *ep_ring,
+		gfp_t mem_flags, struct urb *urb, struct scatterlist *sgl,
+		int num_sgs, int slot_id, unsigned int ep_index)
 {
-	struct xhci_ring *ep_ring;
 	unsigned int num_trbs;
 	struct urb_priv *urb_priv;
 	struct xhci_td *td;
@@ -3212,10 +3292,6 @@ static int queue_bulk_sg_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 	bool more_trbs_coming;
 	union xhci_trb *start_trb;
 	int start_cycle;
-
-	ep_ring = xhci_urb_to_transfer_ring(xhci, urb);
-	if (!ep_ring)
-		return -EINVAL;
 
 	num_trbs = count_sg_trbs_needed(xhci, urb, sgl, num_sgs);
 	total_packet_count = DIV_ROUND_UP(urb->transfer_buffer_length,
@@ -3346,12 +3422,528 @@ static int queue_bulk_sg_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 	return 0;
 }
 
+struct queue_bulk_sg_context {
+	const u32 mbp;
+	const unsigned int tx_len;
+	unsigned int start_idx, enq_idx, final_enq_idx, sg_idx;
+	unsigned int len, mbp_len, running_total, total_packet_count;
+	unsigned int total_links, links, num_sgs;
+	struct scatterlist *sgl, *sg;
+	struct xhci_ring *ring;
+	struct xhci_hcd *xhci;
+	struct xhci_td *td;
+	u32 start_cycle;
+	struct urb *urb;
+	gfp_t flags;
+	int pass;
+};
+
+/*
+ * Helper for queue_bulk_sg_tx_v1 that returns the expected cycle
+ * relative to the passed index, but is careful to maintain the cycle
+ * (maintain software control) of the first trb in a td.
+ */
+static u32 to_enq_cycle(struct queue_bulk_sg_context *q, bool link)
+{
+	unsigned int idx = to_xhci_ring_index(q->ring, q->enq_idx);
+	u32 cycle;
+
+	if (idx <= q->start_idx)
+		cycle = q->start_cycle ^ 1;
+	else
+		cycle = q->start_cycle;
+
+	/*
+	 * gross hack alert: for legacy reasons inc_enq wants to do the
+	 * toggling for link trbs
+	 */
+	if (idx != q->start_idx && link)
+		cycle ^= 1;
+
+	return cycle;
+}
+
+static int conditional_expand(struct queue_bulk_sg_context *q,
+		unsigned int num_trbs)
+{
+	unsigned int enq_to_deq, deq_segid, next_segid;
+	unsigned int deq_idx, next_idx;
+	bool cross_seg;
+
+	/* are we advancing into the deq segment? */
+	next_idx = to_xhci_ring_index(q->ring, q->enq_idx + num_trbs);
+	deq_idx = xhci_ring_pointer_to_index(&q->ring->deq);
+	enq_to_deq = to_xhci_ring_index(q->ring, deq_idx - q->enq_idx);
+	next_segid = next_idx / TRBS_PER_SEGMENT;
+	deq_segid = deq_idx / TRBS_PER_SEGMENT;
+	cross_seg = q->enq_idx % TRBS_PER_SEGMENT + num_trbs > TRBS_PER_SEGMENT;
+	if ((enq_to_deq && num_trbs >= enq_to_deq)
+			|| (cross_seg && next_segid == deq_segid)) {
+		/*
+		 * An assumption has been violated if we are trying to
+		 * expand the ring on pass-2
+		 */
+		if (WARN_ON_ONCE(q->pass == 2))
+			return -EINVAL;
+
+		return xhci_ring_expansion(q->xhci, q->ring,
+				xhci_ring_size(q->ring), q->flags);
+	}
+	return 0;
+}
+
+static bool check_mid_segment_link(struct queue_bulk_sg_context *q)
+{
+	bool was_mid_seg_link = false;
+	union xhci_trb *trb;
+	u32 field;
+
+	trb = to_xhci_ring_trb(q->ring, q->ring->enq.seg, q->enq_idx);
+	if (TRB_TYPE_LINK_LE32(trb->link.control)
+			&& !is_last_xhci_segment_index(q->enq_idx)) {
+		if (q->links) {
+			/*
+			 * We inserted a link previously to avoid a
+			 * td-fragment-segment boundary, skip ahead...
+			 */
+			q->links--;
+			q->enq_idx = xhci_ring_advance_seg(q->ring, q->enq_idx);
+			WARN_ON_ONCE(q->mbp_len);
+			trb = to_xhci_ring_trb(q->ring, q->ring->enq.seg,
+					q->enq_idx);
+			WARN_ON_ONCE(TRB_TYPE_LINK_LE32(trb->link.control));
+			was_mid_seg_link = true;
+		} else {
+			WARN_ON_ONCE(q->pass == 2);
+			/* invalidate this mid-segment link */
+			field = to_enq_cycle(q, false);
+			field |= TRB_TYPE(TRB_TR_NOOP);
+			trb->generic.field[3] = __cpu_to_le32(field);
+		}
+	}
+
+	return was_mid_seg_link;
+}
+
+/*
+ * When a mid-segment-link is invalidated ensure the remainder of the
+ * segment has no cycle-valid or chained trbs
+ */
+static void sync_seg_cycle(struct xhci_ring *ring, struct xhci_segment *seg,
+		unsigned int start_idx, u32 cycle)
+{
+	unsigned int i, num_trbs;
+
+	num_trbs = ALIGN(start_idx, TRBS_PER_SEGMENT) - start_idx;
+	for (i = 0; i < num_trbs; i++) {
+		unsigned int idx = to_xhci_ring_index(ring, start_idx + i);
+		union xhci_trb *trb = to_xhci_ring_trb(ring, seg, idx);
+		u32 val = __le32_to_cpu(trb->generic.field[3]);
+
+		val &= ~(TRB_CYCLE | TRB_CHAIN);
+		val |= cycle;
+		trb->generic.field[3] = __cpu_to_le32(val);
+	}
+}
+
+static int set_mid_segment_link(struct queue_bulk_sg_context *q)
+{
+	union xhci_trb *trb, *last_trb;
+	struct xhci_segment *seg;
+	unsigned int next_idx;
+	u32 val, cycle, chain;
+	int ret, num_trbs;
+
+	/*
+	 * We may have already placed a link here on a previous attempt
+	 * and are now continuing after a truncation.
+	 */
+	if (check_mid_segment_link(q))
+		return 0;
+
+	/*
+	 * If the start of this mbp is the start of a segment that
+	 * implies that the size of the td-fragment is greater than
+	 * TRBS_PER_SEGMENT.  Outside of recompiling the driver with a
+	 * larger TRBS_PER_SEGMENT constant we're stuck, complain.
+	 */
+	if (q->enq_idx % TRBS_PER_SEGMENT == 0) {
+		struct device *dev = &q->urb->dev->dev;
+
+		xhci_warn(q->xhci,
+				"%s %s: scatterlist required too many trbs\n",
+				dev_driver_string(dev), dev_name(dev));
+		return -EINVAL;
+	}
+	next_idx = xhci_ring_advance_seg(q->ring, q->enq_idx);
+	num_trbs = to_xhci_ring_index(q->ring, next_idx - q->enq_idx);
+	ret = conditional_expand(q, num_trbs);
+	if (ret)
+		return ret;
+	/*
+	 * copy the end of segment link to this position, maintaining
+	 * the toggle bit and updating chain and cycle
+	 */
+	seg = to_xhci_ring_segment(q->ring, q->ring->enq.seg, q->enq_idx);
+	trb = to_xhci_ring_trb(q->ring, seg, q->enq_idx);
+	last_trb = &seg->trbs[TRBS_PER_SEGMENT - 1];
+
+	val = le32_to_cpu(last_trb->link.control);
+	val &= ~(TRB_CHAIN | TRB_CYCLE);
+	cycle = to_enq_cycle(q, true);
+	if (q->enq_idx == q->start_idx)
+		chain = 0;
+	else
+		chain = TRB_CHAIN;
+	val |= chain | cycle;
+	trb->link.segment_ptr = last_trb->link.segment_ptr;
+	trb->link.control = cpu_to_le32(val);
+	seg->link = trb;
+
+	/*
+	 * be careful, see the comment in to_enq_cycle(), the cycle we
+	 * have here is flipped since it was obtained for a link trb
+	 */
+	sync_seg_cycle(q->ring, seg, q->enq_idx + 1, cycle ^ 1);
+
+	q->enq_idx = xhci_ring_advance_seg(q->ring, q->enq_idx);
+	q->links++;
+	q->total_links++;
+	return 0;
+}
+
+static unsigned int do_enq_trb(struct queue_bulk_sg_context *q, dma_addr_t dma,
+		unsigned int len)
+{
+	u32 field, length_field, remainder;
+	unsigned int num_trbs, next_idx;
+	bool more_trbs_coming;
+
+	num_trbs = to_xhci_ring_index(q->ring, q->final_enq_idx - q->enq_idx);
+	next_idx = to_xhci_ring_index(q->ring, q->enq_idx + 1);
+
+	/*
+	 * Set cycle being careful not to toggle the cycle of the first
+	 * trb, yet
+	 */
+	field = to_enq_cycle(q, false);
+
+	/*
+	 * Chain all the TRBs together; clear the chain bit in the last
+	 * TRB to indicate it's the last TRB in the chain.
+	 */
+	if (next_idx != q->final_enq_idx) {
+		union xhci_trb *trb;
+
+		/*
+		 * truncate this trb to end on a mbp boundary if we are
+		 * crossing a link with the chain still open
+		 */
+		trb = to_xhci_ring_trb(q->ring, q->ring->enq.seg, next_idx);
+		if (TRB_TYPE_LINK_LE32(trb->link.control)) {
+			unsigned int end;
+
+			end = rounddown(q->len + len, q->mbp);
+			if (WARN_ON_ONCE(end <= q->len))
+				return -EINVAL;
+			len = end - q->len;
+		}
+		field |= TRB_CHAIN;
+	} else {
+		/* FIXME - add check for ZERO_PACKET flag before this */
+		q->td->last_trb = xhci_ring_enqueue(q->ring);
+		field |= TRB_IOC;
+	}
+
+	/* Only set interrupt on short packet for IN endpoints */
+	if (usb_urb_dir_in(q->urb))
+		field |= TRB_ISP;
+
+	remainder = xhci_v1_0_td_remainder(q->running_total, len,
+			q->total_packet_count, q->urb, num_trbs - 1);
+
+	length_field = TRB_LEN(len) | remainder | TRB_INTR_TARGET(0);
+
+	if (num_trbs > 1)
+		more_trbs_coming = true;
+	else
+		more_trbs_coming = false;
+
+	queue_trb(q->ring, more_trbs_coming, lower_32_bits(dma),
+			upper_32_bits(dma), length_field,
+			field | TRB_TYPE(TRB_NORMAL));
+
+	q->running_total += len;
+	return len;
+}
+
+struct truncate_mark {
+	unsigned int truncate_pos;
+	struct scatterlist *sg;
+	unsigned int ring_idx;
+	unsigned int mbp_len;
+	unsigned int len;
+	bool do_truncate;
+	int sg_idx;
+};
+
+static int try_queue_sg_ent(struct queue_bulk_sg_context *q,
+		struct truncate_mark *mark, const unsigned int sg_len)
+{
+	int ret;
+	unsigned int queued_len = 0;
+	unsigned int sg_enq_idx = q->enq_idx;
+
+	do {
+		unsigned int offset, len = sg_len - queued_len;
+		bool do_set_link = false;
+
+		/* check if we hit the end of the current segment */
+		if (is_last_xhci_segment_index(q->enq_idx)) {
+			if (q->mbp_len % q->mbp != 0) {
+				/*
+				 * Hmm, we hit a segment boundary, but we've
+				 * already queued some data for this mbp
+				 * fragment.  Back up to the last trb to cross a
+				 * mbp, truncate it and then set a mid-segment
+				 * link so that the next mbp can start in a
+				 * fresh segment.
+				 */
+				mark->do_truncate = true;
+				if (WARN_ON_ONCE(q->pass == 2))
+					return -EINVAL;
+				return -EAGAIN;
+			}
+
+			ret = conditional_expand(q, 1);
+			if (ret)
+				return ret;
+			q->enq_idx = xhci_ring_advance_seg(q->ring, q->enq_idx);
+		}
+
+		/*
+		 * how much of this sg can we queue in this trb? I.e. check 64k
+		 * and mbp boundaries
+		 */
+		offset = (sg_dma_address(q->sg) + queued_len)
+			% TRB_MAX_BUFF_SIZE;
+		if ((offset + len) > TRB_MAX_BUFF_SIZE) {
+			dma_addr_t start = sg_dma_address(q->sg) + queued_len;
+			dma_addr_t end, dma_len;
+
+			end = round_down(start + len, TRB_MAX_BUFF_SIZE);
+
+			dma_len = end - start;
+			xhci_dbg(q->xhci, "trim64: %#4x -> %pad\n", len,
+					&dma_len);
+			len = end - start;
+		}
+
+		/*
+		 * Check if we are servicing a truncation and limit len
+		 * to end on a mbp boundary. There are 2 truncation cases to
+		 * consider:
+		 * 1/ Never hit an mbp before hitting the end of the
+		 *    segment, the first data trb in the td needs to be
+		 *    placed in the next segment.
+		 *    (mark->truncate_pos == 0)
+		 * 2/ One of the trbs we queued crossed a trb.  Find
+		 *    that boundary, trim the length to end on a trb
+		 *    boundary and set a mid segment link, unless we
+		 *    are already at the end of the segment after
+		 *    submitting the trimmed trb.
+		 */
+		if (q->pass == 1 && mark->do_truncate
+				&& (q->len + len >= mark->truncate_pos)) {
+			mark->do_truncate = false;
+			if (mark->truncate_pos == 0) {
+				ret = set_mid_segment_link(q);
+				if (ret)
+					return ret;
+				WARN_ON_ONCE(q->mbp_len);
+				continue;
+			} else {
+				len = mark->truncate_pos - q->len;
+				do_set_link = true;
+			}
+		}
+
+		/* write this trb and advance the actual enqueue pointer */
+		if (q->pass == 2)
+			len = do_enq_trb(q, sg_dma_address(q->sg) + queued_len, len);
+
+		/* advance index tracker to next portion of the transfer */
+		q->enq_idx = to_xhci_ring_index(q->ring, q->enq_idx + 1);
+
+		/* mark that we crossed a mbp boundary */
+		if (q->len % q->mbp + len >= q->mbp) {
+			/* where to set the link after restart */
+			q->len += len;
+			mark->truncate_pos = rounddown(q->len, q->mbp);
+
+			/* where we were at the start of this sg */
+			mark->sg = q->sg;
+			mark->len = q->len - queued_len - len;
+			mark->sg_idx = q->sg_idx;
+			mark->ring_idx = sg_enq_idx;
+		} else {
+			q->len += len;
+		}
+
+		/*
+		 * track how far into a mbp we are for determining when
+		 * to trigger truncation
+		 */
+		q->mbp_len = (q->mbp_len + len) % q->mbp;
+
+		/* check if enq has advanced to a mid-segment link trb */
+		if (do_set_link && !is_last_xhci_segment_index(q->enq_idx)) {
+			WARN_ON_ONCE(q->mbp_len);
+			ret = set_mid_segment_link(q);
+			if (ret)
+				return ret;
+		} else
+			check_mid_segment_link(q);
+		queued_len += len;
+	} while (sg_len - queued_len);
+
+	return 0;
+}
+
+#define for_each_sg_continue(sg, nr, __i)	\
+	for (; __i < (nr); __i++, sg = sg_next(sg))
+
+static int parse_sg(struct queue_bulk_sg_context *q, int pass)
+{
+	struct truncate_mark mark = {
+		.ring_idx = q->start_idx,
+		.do_truncate = false,
+		.truncate_pos = 0,
+		.sg = q->sgl,
+		.sg_idx = 0,
+		.len = 0,
+	};
+
+	q->pass = pass;
+	q->links = q->total_links;
+ restart:
+	q->sg_idx = mark.sg_idx;
+	q->len = mark.len;
+	q->sg = mark.sg;
+	q->mbp_len = q->len % q->mbp;
+	q->enq_idx = mark.ring_idx;
+
+	for_each_sg_continue(q->sg, q->num_sgs, q->sg_idx) {
+		unsigned int len = sg_dma_len(q->sg);
+		int ret;
+
+		/* check if enq has advanced to a mid-segment link trb */
+		check_mid_segment_link(q);
+
+		/* check if we've mapped more than is set to be transferred */
+		if (len + q->len > q->tx_len)
+			len = q->tx_len - q->len;
+		if (len == 0)
+			break;
+		/* ok, we have some data to enqueue at this index */
+		ret = try_queue_sg_ent(q, &mark, len);
+		if (ret == -EAGAIN)
+			goto restart;
+		else if (ret)
+			return ret;
+	}
+	return 0;
+}
+
+static int queue_bulk_sg_tx_v1(struct xhci_hcd *xhci, struct xhci_ring *ring,
+		gfp_t mem_flags, struct urb *urb, struct scatterlist *sgl,
+		int num_sgs, int slot_id, unsigned int ep_index)
+{
+	int ret;
+	struct urb_priv *urb_priv;
+	union xhci_trb *start_trb;
+	unsigned int final_enq_idx;
+	struct xhci_virt_device *xdev = xhci->devs[slot_id];
+	struct xhci_ep_ctx *ep_ctx = xhci_get_ep_ctx(xhci, xdev->out_ctx, 0);
+	struct queue_bulk_sg_context q = { .mbp = xhci_get_ep_ctx_mbp(ep_ctx),
+		.tx_len = urb->transfer_buffer_length, .urb = urb,
+		.flags = mem_flags, .xhci = xhci, .sgl = sgl,
+		.num_sgs = num_sgs, .ring = ring, };
+
+	ret = check_ep_submit_state(xhci, ep_ctx);
+	if (ret)
+		return ret;
+
+	ret = prepare_td(q.ring, urb, 0);
+	if (ret)
+		return ret;
+
+	urb_priv = urb->hcpriv;
+	q.td = urb_priv->td[0];
+
+	/*
+	 * Don't give the first TRB to the hardware (by toggling the cycle bit)
+	 * until we've finished creating all the other TRBs.
+	 */
+	start_trb = xhci_ring_enqueue(q.ring);
+	q.start_cycle = q.ring->cycle_state;
+	q.start_idx = xhci_ring_pointer_to_index(&q.ring->enq);
+
+	/*
+	 * Pass 1 walk the sg list to:
+	 * 1/ invalidate current mid-segment links (if present)
+	 * 2/ determine the td fragment boundaries
+	 * 3/ place mid-segment links where necessary
+	 * 4/ increase the size of the ring to accommodate the full td
+	 *
+	 * The scatterlist walk restarts if we find a td-fragment that will not
+	 * fit within a partial segment.  If we find a td-fragment what will not
+	 * fit in a full segment then we fail the request entirely.
+	 */
+	q.total_links = 0;
+	ret = parse_sg(&q, 1);
+	if (ret)
+		return ret;
+
+	if (enqueue_is_link_trb(ring))
+		advance_enq(ring, 0, do_carry_chain(xhci, ring));
+
+	q.final_enq_idx = q.enq_idx;
+	q.total_packet_count = DIV_ROUND_UP(urb->transfer_buffer_length,
+			usb_endpoint_maxp(&urb->ep->desc));
+
+	/* Pass 2 enqueue trbs and honor the established mid-segment links */
+	ret = parse_sg(&q, 2);
+	if (ret)
+		return ret;
+
+	/*
+	 * standard ->inc_enq() gets num_trbs_accounting wrong, see
+	 * v1_reap_td
+	 */
+	q.ring->num_trbs_free = xhci_ring_num_trbs_free(q.ring);
+
+	/* validate that enq.ptr reached final_enq_idx */
+	final_enq_idx = xhci_ring_pointer_to_index(&q.ring->enq);
+	check_trb_math(urb, final_enq_idx - q.final_enq_idx,
+			q.running_total);
+	giveback_first_trb(xhci, slot_id, ep_index, urb->stream_id,
+			q.start_cycle, start_trb);
+	return 0;
+}
+
 int xhci_queue_bulk_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 		struct urb *urb, int slot_id, unsigned int ep_index)
 {
+	struct xhci_ring *ring = xhci_urb_to_transfer_ring(xhci, urb);
+
+	if (!ring)
+		return -EINVAL;
+
 	if (urb->num_sgs)
-		return queue_bulk_sg_tx(xhci, mem_flags, urb, urb->sg,
-				urb->num_mapped_sgs, slot_id, ep_index);
+		return ring->ops->queue_bulk_sg_tx(xhci, ring, mem_flags, urb,
+				urb->sg, urb->num_mapped_sgs, slot_id,
+				ep_index);
 	else {
 		struct scatterlist scatter, *sg = &scatter;
 
@@ -3361,8 +3953,8 @@ int xhci_queue_bulk_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 		sg->dma_address = urb->transfer_dma;
 		sg_dma_len(sg) = sg->length;
 
-		return queue_bulk_sg_tx(xhci, mem_flags, urb, sg, 1, slot_id,
-				ep_index);
+		return ring->ops->queue_bulk_sg_tx(xhci, ring, mem_flags, urb,
+				sg, 1, slot_id, ep_index);
 	}
 }
 

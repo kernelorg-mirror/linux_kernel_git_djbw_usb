@@ -103,7 +103,8 @@ static void xhci_link_rings(struct xhci_hcd *xhci, struct xhci_ring *ring,
 		struct list_head *segments, unsigned int num_segs)
 {
 	struct xhci_segment *insert_head, *insert_next, *new_head, *new_tail;
-	struct xhci_segment *last_seg = xhci_ring_last_seg(ring);
+	struct xhci_segment *last_seg = xhci_ring_last_seg(ring), *seg;
+	int i;
 
 	new_tail = list_last_entry(segments, typeof(*new_tail), list);
 	new_head = list_first_entry(segments, typeof(*new_head), list);
@@ -124,6 +125,11 @@ static void xhci_link_rings(struct xhci_hcd *xhci, struct xhci_ring *ring,
 		last_seg->link->link.control &= ~cpu_to_le32(LINK_TOGGLE);
 		new_tail->link->link.control |= cpu_to_le32(LINK_TOGGLE);
 	}
+
+	i = insert_head->segid + 1;
+	seg = insert_head;
+	list_for_each_entry_continue(seg, &ring->segments, list)
+		seg->segid = i++;
 }
 
 /*
@@ -257,8 +263,9 @@ void xhci_ring_free(struct xhci_ring *ring)
 static void xhci_initialize_ring_info(struct xhci_ring *ring,
 					unsigned int cycle_state)
 {
-	struct xhci_segment *first_seg = xhci_ring_first_seg(ring);
+	struct xhci_segment *first_seg = xhci_ring_first_seg(ring), *seg;
 	struct xhci_ring_pointer enq = { first_seg, first_seg->trbs };
+	int i;
 
 	/* The ring is empty, so the enqueue pointer == dequeue pointer */
 	xhci_ring_set_enqueue(ring, &enq);
@@ -280,7 +287,11 @@ static void xhci_initialize_ring_info(struct xhci_ring *ring,
 	 * Each segment has a link TRB, and leave an extra TRB for SW
 	 * accounting purpose
 	 */
-	ring->num_trbs_free = (1 << ring->order) * (TRBS_PER_SEGMENT - 1) - 1;
+	ring->num_trbs_free = xhci_ring_size(ring) - xhci_ring_num_segs(ring) - 1;
+
+	i = 0;
+	list_for_each_entry(seg, &ring->segments, list)
+		seg->segid = i++;
 }
 
 /* Allocate segments and link them for a ring */
